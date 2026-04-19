@@ -1,0 +1,6 @@
+# Client dependencies
+PyQt6>=6.6.0
+websockets>=12.0
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+pyinstaller>=6.5.0
