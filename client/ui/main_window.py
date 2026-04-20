@@ -176,9 +176,22 @@ class MainWindow(QMainWindow):
         for g in guilds:
             self._guild_combo.addItem(g["name"], g["id"])
         self._guild_combo.blockSignals(False)
-        if guilds and self._guild_id is None:
+
+        if not guilds:
+            return
+
+        if self._guild_id is None:
+            # First load — select first guild
             self._guild_combo.setCurrentIndex(0)
             self._on_guild_changed(0)
+        else:
+            # Reconnect — restore the previously selected guild
+            restore_idx = next(
+                (i for i, g in enumerate(guilds) if int(g["id"]) == self._guild_id),
+                0,
+            )
+            self._guild_combo.setCurrentIndex(restore_idx)
+            self.client.fetch_state(self._guild_id)
 
     @pyqtSlot(int)
     def _on_guild_changed(self, idx: int) -> None:

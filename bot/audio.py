@@ -96,6 +96,7 @@ class MusicPlayer:
 
         self._volume: float = 0.5
         self._paused: bool = False
+        self._intentional_stop: bool = False
 
         # progress tracking
         self._play_started_at: float = 0.0
@@ -134,7 +135,7 @@ class MusicPlayer:
         await self._on_state_change(self.guild_id)
 
     async def play_next(self) -> None:
-        if not self.queue or not self.voice_client:
+        if not self.queue or not self.voice_client or not self.voice_client.is_connected():
             if self.current:
                 self.history.append(self.current)
                 self.current = None
@@ -154,7 +155,7 @@ class MusicPlayer:
         source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
 
         self._play_started_at = time.time()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _after(error: Optional[Exception]) -> None:
             if error:
@@ -230,6 +231,7 @@ class MusicPlayer:
     # ------------------------------------------------------------------ lifecycle
 
     async def stop_and_disconnect(self) -> None:
+        self._intentional_stop = True
         self.queue.clear()
         if self.voice_client:
             if self.voice_client.is_playing() or self.voice_client.is_paused():

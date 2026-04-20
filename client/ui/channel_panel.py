@@ -7,8 +7,9 @@ from PyQt6.QtGui import QFont
 
 
 class ChannelPanel(QFrame):
-    join_requested  = pyqtSignal(int, int)  # guild_id, channel_id
-    leave_requested = pyqtSignal(int)       # guild_id
+    # object instead of int — Qt truncates 64-bit Discord snowflakes to 32-bit with pyqtSignal(int)
+    join_requested  = pyqtSignal(object, object)  # guild_id, channel_id
+    leave_requested = pyqtSignal(object)           # guild_id
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -96,13 +97,14 @@ class ChannelPanel(QFrame):
                       and int(ch["id"]) == self._connected_ch_id)
             text = f"  🔊  {ch['name']}"
             item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, int(ch["id"]))
+            item.setData(Qt.ItemDataRole.UserRole, str(ch["id"]))  # store as str, Qt truncates large ints
             if active:
                 item.setForeground(
                     __import__("PyQt6.QtGui", fromlist=["QColor"]).QColor("#58a6ff")
                 )
                 item.setFont(_bold_font())
             self._list.addItem(item)
+
 
     def _refresh_btn(self) -> None:
         if self._connected_ch_id is not None:
@@ -125,11 +127,10 @@ class ChannelPanel(QFrame):
         if item:
             self.join_requested.emit(
                 self._guild_id,
-                int(item.data(Qt.ItemDataRole.UserRole)),
+                int(item.data(Qt.ItemDataRole.UserRole)),  # data is str, safe to int()
             )
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
-        # single click selects channel but doesn't join
         pass
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
@@ -137,7 +138,7 @@ class ChannelPanel(QFrame):
             return
         self.join_requested.emit(
             self._guild_id,
-            int(item.data(Qt.ItemDataRole.UserRole)),
+            int(item.data(Qt.ItemDataRole.UserRole)),  # data is str, safe to int()
         )
 
 

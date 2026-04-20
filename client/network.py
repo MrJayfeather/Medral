@@ -59,8 +59,8 @@ class ApiClient(QObject):
             try:
                 async with websockets.connect(
                     self._ws_url,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=None,   # server sends JSON {"type":"ping"} every 25 s
+                    open_timeout=10,
                 ) as ws:
                     self.ws_connected.emit()
                     retry = 2.0
@@ -69,8 +69,10 @@ class ApiClient(QObject):
                             data = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
-                        if data.get("type") == "state_update":
+                        msg_type = data.get("type")
+                        if msg_type == "state_update":
                             self.state_updated.emit(data)
+                        # "ping" messages from server are ignored (keepalive only)
             except Exception:
                 pass
             if self._running:

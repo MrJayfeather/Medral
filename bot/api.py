@@ -57,19 +57,39 @@ async def _broadcast_state(guild_id: int, state: dict) -> None:
 
 # ------------------------------------------------------------------ lifespan
 
+async def _keepalive_loop() -> None:
+    """Sends a JSON ping every 25 s and a position update every 10 s."""
+    tick = 0
+    while True:
+        await asyncio.sleep(5)
+        tick += 1
+        if not manager.count:
+            continue
+        if tick % 5 == 0:          # every 25 s — application-level keepalive
+            await manager.broadcast({"type": "ping"})
+        if tick % 2 == 0:          # every 10 s — position sync while playing
+            for player in music_bot.get_all_players().values():
+                if player.is_playing:
+                    await manager.broadcast(
+                        {"type": "state_update", **player.get_state()}
+                    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is not set. Check your .env file.")
 
     music_bot.set_broadcast_callback(_broadcast_state)
-    bot_task = asyncio.create_task(music_bot.bot.start(TOKEN))
+    bot_task        = asyncio.create_task(music_bot.bot.start(TOKEN))
+    keepalive_task  = asyncio.create_task(_keepalive_loop())
     print(f"[api] HTTP server running on {API_HOST}:{API_PORT}")
     print("[api] Discord bot connecting...")
 
     try:
         yield
     finally:
+        keepalive_task.cancel()
         bot_task.cancel()
         if not music_bot.bot.is_closed():
             await music_bot.bot.close()

@@ -19,6 +19,14 @@ bot = discord.Bot(intents=intents)
 # guild_id -> MusicPlayer
 _players: Dict[int, MusicPlayer] = {}
 
+# pending voice-reconnect tasks (one per guild)
+_reconnect_tasks: Dict[int, asyncio.Task] = {}
+# per-guild lock to serialize reconnect attempts
+_reconnect_locks: Dict[int, asyncio.Lock] = {}
+# per-guild reconnect attempt counter
+_reconnect_attempts: Dict[int, int] = {}
+MAX_RECONNECT_ATTEMPTS = 3
+
 # set by api.py so state updates are broadcast to WebSocket clients
 _broadcast: Optional[Callable[[int, dict], Awaitable[None]]] = None
 
@@ -66,21 +74,137 @@ async def on_ready() -> None:
     print(f"[bot] serving {len(bot.guilds)} guild(s)")
 
 
+async def _reconnect_voice(guild_id: int, channel_id: int) -> None:
+    """
+    Debounced voice-reconnect. Serialized per-guild so only one attempt runs
+    at a time. Gives up after MAX_RECONNECT_ATTEMPTS to avoid hammering
+    Discord when the network simply can't maintain voice.
+    """
+    try:
+        await asyncio.sleep(3)
+    except asyncio.CancelledError:
+        return
+
+    _reconnect_tasks.pop(guild_id, None)
+
+    lock = _reconnect_locks.setdefault(guild_id, asyncio.Lock())
+    async with lock:
+        guild = bot.get_guild(guild_id)
+        p     = _players.get(guild_id)
+        if not guild or not p:
+            return
+
+        # Authoritative check — is voice actually down?
+        existing = discord.utils.get(bot.voice_clients, guild=guild)
+        if existing and existing.is_connected():
+            if p.voice_client is not existing:
+                p.voice_client = existing
+                print(f"[voice] voice client restored by py-cord in {guild.name}")
+                await _notify(guild_id)
+            _reconnect_attempts[guild_id] = 0
+            return
+
+        attempt = _reconnect_attempts.get(guild_id, 0) + 1
+        _reconnect_attempts[guild_id] = attempt
+
+        if attempt > MAX_RECONNECT_ATTEMPTS:
+            print(f"[voice] giving up after {MAX_RECONNECT_ATTEMPTS} failed "
+                  f"attempts in {guild.name} — check network/firewall "
+                  f"(Discord voice needs stable outbound UDP)")
+            p.current = None
+            p.queue.clear()
+            await _notify(guild_id)
+            return
+
+        channel = guild.get_channel(channel_id)
+        if not channel or not isinstance(channel, discord.VoiceChannel):
+            return
+
+        print(f"[voice] reconnect attempt {attempt}/{MAX_RECONNECT_ATTEMPTS} "
+              f"to #{channel.name} in {guild.name}")
+        try:
+            vc = await channel.connect(timeout=15.0, reconnect=True)
+            p.voice_client = vc
+            print(f"[voice] reconnected to #{channel.name}")
+            _reconnect_attempts[guild_id] = 0
+            await _maybe_resume(p, guild_id)
+        except discord.ClientException as exc:
+            if "Already connected" in str(exc):
+                vc = discord.utils.get(bot.voice_clients, guild=guild)
+                if vc:
+                    p.voice_client = vc
+                    _reconnect_attempts[guild_id] = 0
+                    await _notify(guild_id)
+                    return
+            print(f"[voice] reconnect failed: {exc}")
+            await _notify(guild_id)
+        except Exception as exc:
+            print(f"[voice] reconnect failed: {exc}")
+            await _notify(guild_id)
+
+
+async def _maybe_resume(p, guild_id: int) -> None:
+    """Put the interrupted track back and resume if there's a queue."""
+    if p.current:
+        p.queue.appendleft(p.current)
+        p.current = None
+    if p.queue and not p.is_playing:
+        await p.play_next()
+    else:
+        await _notify(guild_id)
+
+
 @bot.event
 async def on_voice_state_update(
     member: discord.Member,
     before: discord.VoiceState,
     after: discord.VoiceState,
 ) -> None:
-    # notify clients when the bot is moved / disconnected externally
-    if member == bot.user:
-        p = _players.get(member.guild.id)
-        if p:
-            if after.channel is None:
-                p.voice_client = None
-                p.current = None
-                p.queue.clear()
+    if member != bot.user:
+        return
+    p = _players.get(member.guild.id)
+    if not p:
+        return
+
+    if after.channel is None:
+        # py-cord sometimes fires spurious after=None events during a
+        # gateway session RESUME even though the voice connection is alive.
+        # Verify against the authoritative bot.voice_clients list first.
+        live_vc = discord.utils.get(bot.voice_clients, guild=member.guild)
+        if live_vc is not None and live_vc.is_connected():
+            p.voice_client = live_vc
+            return
+
+        intentional = p._intentional_stop
+        p._intentional_stop = False
+        p.voice_client = None
+
+        if intentional:
+            # /leave or stop command — clear everything
+            p.current = None
+            p.queue.clear()
             await _notify(member.guild.id)
+        else:
+            # Unexpected disconnect — keep queue, schedule ONE reconnect task
+            prev_channel_id = before.channel.id if before.channel else None
+            print(f"[voice] unexpected disconnect in {member.guild.name} "
+                  f"(was in channel {before.channel})")
+            await _notify(member.guild.id)
+            if prev_channel_id:
+                # Cancel any previous pending reconnect for this guild
+                old = _reconnect_tasks.get(member.guild.id)
+                if old and not old.done():
+                    old.cancel()
+                _reconnect_tasks[member.guild.id] = asyncio.create_task(
+                    _reconnect_voice(member.guild.id, prev_channel_id)
+                )
+    else:
+        # Bot moved to another channel or gateway reconnected —
+        # refresh the VoiceClient reference so it stays valid.
+        vc = discord.utils.get(bot.voice_clients, guild=member.guild)
+        if vc is not None:
+            p.voice_client = vc
+        await _notify(member.guild.id)
 
 
 # ------------------------------------------------------------------ slash commands
@@ -245,10 +369,31 @@ async def api_join(guild_id: int, channel_id: int) -> dict:
     if not channel or not isinstance(channel, discord.VoiceChannel):
         return {"ok": False, "error": "channel not found"}
     p = _player(guild_id)
-    if p.voice_client and p.voice_client.is_connected():
-        await p.voice_client.move_to(channel)
-    else:
-        p.voice_client = await channel.connect()
+
+    # User-initiated connect — reset circuit breaker
+    _reconnect_attempts[guild_id] = 0
+    old = _reconnect_tasks.pop(guild_id, None)
+    if old and not old.done():
+        old.cancel()
+
+    vc = guild.voice_client  # authoritative Discord cache
+    try:
+        if vc is not None:
+            if not vc.is_connected():
+                await vc.disconnect(force=True)
+                vc = await channel.connect()
+            elif vc.channel.id != channel.id:
+                await vc.move_to(channel)
+        else:
+            vc = await channel.connect()
+    except discord.ClientException:
+        # Race condition: another request is already connecting.
+        # Find the connection via bot.voice_clients (lower-level list).
+        vc = discord.utils.get(bot.voice_clients, guild=guild)
+        if vc is None:
+            return {"ok": False, "error": "voice connection busy, try again"}
+
+    p.voice_client = vc
     await _notify(guild_id)
     return {"ok": True}
 
