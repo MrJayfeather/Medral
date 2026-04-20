@@ -22,7 +22,7 @@ a = Analysis(
         (str(ROOT / 'client' / 'styles.py'), '.'),
         (str(ROOT / 'client' / 'network.py'),'.'),
         # yt-dlp extractors
-        ('venv/Lib/site-packages/yt_dlp',    'yt_dlp'),
+        (str(ROOT / 'venv' / 'Lib' / 'site-packages' / 'yt_dlp'), 'yt_dlp'),
     ],
     hiddenimports=[
         # ---- client ----
