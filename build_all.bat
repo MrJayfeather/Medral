@@ -3,11 +3,10 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================================
-echo  Medral — Full Build  (Server + Client)
+echo  Medral Build — MedralPlayer.exe
 echo ============================================================
 echo.
 
-:: ---- venv ----
 if not exist "venv\Scripts\activate.bat" (
     echo [setup] Creating virtual environment...
     python -m venv venv
@@ -15,47 +14,32 @@ if not exist "venv\Scripts\activate.bat" (
 )
 call venv\Scripts\activate.bat
 
-:: ---- all deps (server + client + pyinstaller) ----
 echo [setup] Installing dependencies...
-pip install --pre -r requirements.txt -q
+pip install --pre -q -r requirements.txt
+pip install -q -r client\requirements.txt
 if errorlevel 1 ( echo [error] pip install failed & pause & exit /b 1 )
-pip install -r client\requirements.txt -q
-if errorlevel 1 ( echo [error] pip install (client) failed & pause & exit /b 1 )
 
-:: ---- check ffmpeg ----
 ffmpeg -version >nul 2>&1
 if errorlevel 1 (
-    echo [warning] FFmpeg not found on PATH.
-    echo           MedralServer.exe will not play audio without FFmpeg.
-    echo           Get it from https://ffmpeg.org and put ffmpeg.exe next to MedralServer.exe.
+    echo [warning] FFmpeg not found. Audio won't work in local mode.
+    echo           Get it from https://ffmpeg.org and put ffmpeg.exe next to MedralPlayer.exe.
     echo.
 )
 
 echo.
-echo ============================================================
-echo  Building MedralServer.exe
-echo ============================================================
-pyinstaller bot\server.spec --distpath dist --workpath build\server --noconfirm
-if errorlevel 1 ( echo [error] Server build failed & pause & exit /b 1 )
+echo [build] PyInstaller...
+pyinstaller client\client.spec --distpath dist --workpath build --noconfirm
+if errorlevel 1 ( echo [error] Build failed & pause & exit /b 1 )
 
-echo.
-echo ============================================================
-echo  Building MedralPlayer.exe
-echo ============================================================
-pyinstaller client\client.spec --distpath dist --workpath build\client --noconfirm
-if errorlevel 1 ( echo [error] Client build failed & pause & exit /b 1 )
-
-:: ---- copy version.txt into dist/ so client can read it ----
 copy /y version.txt dist\version.txt >nul
 
 echo.
 echo ============================================================
-echo  Done!
+echo  Done!  dist\MedralPlayer.exe
 echo ============================================================
-echo   dist\MedralServer.exe  — run on your PC or copy to VPS
-echo   dist\MedralPlayer.exe  — share with anyone; auto-starts server
 echo.
-echo  To distribute: put BOTH exe files + .env in the same folder.
-echo  Users only need MedralPlayer.exe; it will start the server.
+echo  To use locally:  copy MedralPlayer.exe + .env to one folder
+echo  To connect VPS:  just run MedralPlayer.exe, enter server IP
+echo  To publish update: run release.bat
 echo ============================================================
 pause

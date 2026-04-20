@@ -80,6 +80,14 @@ async def lifespan(app: FastAPI):
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is not set. Check your .env file.")
 
+    # py-cord captures the event loop at Bot.__init__ time (module import).
+    # Rebind all loop references to uvicorn's actual running loop so that
+    # voice connect tasks don't land on a different loop.
+    loop = asyncio.get_running_loop()
+    music_bot.bot.loop = loop
+    music_bot.bot.http.loop = loop
+    music_bot.bot._connection.loop = loop
+
     music_bot.set_broadcast_callback(_broadcast_state)
     bot_task        = asyncio.create_task(music_bot.bot.start(TOKEN))
     keepalive_task  = asyncio.create_task(_keepalive_loop())
