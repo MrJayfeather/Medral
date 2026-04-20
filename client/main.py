@@ -72,7 +72,7 @@ def _load_config() -> dict:
     try:
         return json.loads(CONFIG_FILE.read_text())
     except Exception:
-        return {"host": "127.0.0.1", "port": 8000}
+        return {"host": "89.124.90.59", "port": 8000}
 
 
 def _save_config(cfg: dict) -> None:
@@ -342,22 +342,9 @@ def main() -> None:
     app.setStyleSheet(STYLESHEET)
     app.setFont(QFont("Segoe UI", 10))
 
-    cfg = _load_config()
-
-    # Auto-connect if host was saved from a previous session
-    if cfg.get("host") and cfg["host"] != "127.0.0.1" or cfg.get("auto_connect"):
-        host = cfg.get("host", "127.0.0.1")
-        port = cfg.get("port", 8000)
-    else:
-        dialog = ConnectDialog(cfg)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            sys.exit(0)
-        host = dialog.result_host
-        port = dialog.result_port
-        cfg["host"] = host
-        cfg["port"] = port
-        cfg["auto_connect"] = True
-        _save_config(cfg)
+    cfg  = _load_config()
+    host = cfg.get("host", "89.124.90.59")
+    port = cfg.get("port", 8000)
 
     client = ApiClient(host, port)
     client.start()

@@ -254,19 +254,19 @@ class MainWindow(QMainWindow):
         # if nothing is playing, ignore (user should search first)
 
     def _on_change_server(self) -> None:
-        import json
+        import json, sys, subprocess
         from pathlib import Path
-        cfg_file = Path.home() / ".medral" / "config.json"
-        try:
-            cfg = json.loads(cfg_file.read_text())
-        except Exception:
-            cfg = {}
-        cfg.pop("auto_connect", None)
-        cfg_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg_file.write_text(json.dumps(cfg, indent=2))
+        from main import ConnectDialog, _load_config, _save_config
+
+        cfg    = _load_config()
+        dialog = ConnectDialog(cfg)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        cfg["host"] = dialog.result_host
+        cfg["port"] = dialog.result_port
+        _save_config(cfg)
+
         self.client.stop()
-        import sys
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
-        import subprocess
         subprocess.Popen([sys.executable] + sys.argv)
