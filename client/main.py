@@ -342,17 +342,24 @@ def main() -> None:
     app.setStyleSheet(STYLESHEET)
     app.setFont(QFont("Segoe UI", 10))
 
-    cfg    = _load_config()
-    dialog = ConnectDialog(cfg)
+    cfg = _load_config()
 
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        sys.exit(0)
+    # Auto-connect if host was saved from a previous session
+    if cfg.get("host") and cfg["host"] != "127.0.0.1" or cfg.get("auto_connect"):
+        host = cfg.get("host", "127.0.0.1")
+        port = cfg.get("port", 8000)
+    else:
+        dialog = ConnectDialog(cfg)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            sys.exit(0)
+        host = dialog.result_host
+        port = dialog.result_port
+        cfg["host"] = host
+        cfg["port"] = port
+        cfg["auto_connect"] = True
+        _save_config(cfg)
 
-    cfg["host"] = dialog.result_host
-    cfg["port"] = dialog.result_port
-    _save_config(cfg)
-
-    client = ApiClient(dialog.result_host, dialog.result_port)
+    client = ApiClient(host, port)
     client.start()
 
     window = MainWindow(client)
@@ -361,7 +368,7 @@ def main() -> None:
     QTimer.singleShot(800, client.fetch_guilds)
 
     def _do_update_check():
-        _check_update(dialog.result_host, dialog.result_port, CLIENT_VERSION)
+        _check_update(host, port, CLIENT_VERSION)
         pending = getattr(UpdateDialog, "_pending", None)
         if pending:
             del UpdateDialog._pending

@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QComboBox, QLabel, QFrame,
+    QSplitter, QComboBox, QLabel, QFrame, QPushButton,
 )
 from PyQt6.QtCore import Qt, pyqtSlot, QTimer
 
@@ -111,6 +111,13 @@ class MainWindow(QMainWindow):
         self._dot.setStyleSheet("color:#f85149; font-size:14px; background:transparent;")
         self._dot.setToolTip("WebSocket disconnected")
         lay.addWidget(self._dot)
+
+        change_btn = QPushButton("⚙")
+        change_btn.setToolTip("Сменить сервер")
+        change_btn.setFixedSize(28, 28)
+        change_btn.setStyleSheet("background:transparent; border:none; color:#7d8590; font-size:16px;")
+        change_btn.clicked.connect(self._on_change_server)
+        lay.addWidget(change_btn)
 
         return bar
 
@@ -245,3 +252,21 @@ class MainWindow(QMainWindow):
         elif self._state.get("is_playing"):
             self.client.pause(self._guild_id)
         # if nothing is playing, ignore (user should search first)
+
+    def _on_change_server(self) -> None:
+        import json
+        from pathlib import Path
+        cfg_file = Path.home() / ".medral" / "config.json"
+        try:
+            cfg = json.loads(cfg_file.read_text())
+        except Exception:
+            cfg = {}
+        cfg.pop("auto_connect", None)
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(json.dumps(cfg, indent=2))
+        self.client.stop()
+        import sys
+        from PyQt6.QtWidgets import QApplication
+        QApplication.quit()
+        import subprocess
+        subprocess.Popen([sys.executable] + sys.argv)
