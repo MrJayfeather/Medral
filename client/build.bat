@@ -1,22 +1,44 @@
 @echo off
+setlocal
 cd /d "%~dp0.."
 
-if not exist "venv" (
-    echo [error] venv not found. Run run_server.bat first to create it, or create a separate client venv.
+echo ============================================================
+echo  Medral Client Build
+echo ============================================================
+
+:: ---- venv ----
+if not exist "venv\Scripts\activate.bat" (
+    echo [setup] Creating virtual environment...
+    python -m venv venv
+)
+call venv\Scripts\activate.bat
+
+:: ---- install client deps ----
+echo [setup] Installing client dependencies...
+pip install -r client\requirements.txt -q
+if errorlevel 1 ( echo [error] pip install failed & pause & exit /b 1 )
+
+:: ---- build ----
+echo [build] Running PyInstaller...
+pyinstaller ^
+  --onefile ^
+  --windowed ^
+  --name "MedralPlayer" ^
+  --paths "client" ^
+  --add-data "client\ui;ui" ^
+  --add-data "client\styles.py;." ^
+  --hidden-import "PyQt6.QtNetwork" ^
+  --hidden-import "PyQt6.sip" ^
+  --hidden-import "aiohttp" ^
+  --hidden-import "websockets" ^
+  client\main.py
+
+if errorlevel 1 (
+    echo [error] PyInstaller failed.
     pause
     exit /b 1
 )
 
-call venv\Scripts\activate.bat
-pip install -r client\requirements.txt -q
-
-echo [build] Packaging client with PyInstaller...
-pyinstaller ^
-    --onefile ^
-    --windowed ^
-    --name "MedralPlayer" ^
-    --add-data "client\ui;ui" ^
-    client\main.py
-
-echo [build] Done. Executable is in dist\MedralPlayer.exe
+echo.
+echo [done] dist\MedralPlayer.exe is ready.
 pause
