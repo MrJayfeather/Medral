@@ -258,11 +258,10 @@ class MainWindow(QMainWindow):
         # if nothing is playing, ignore (user should search first)
 
     def _on_change_server(self) -> None:
-        import json, sys, subprocess
+        import json
         from pathlib import Path
-        from PyQt6.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout
-        from PyQt6.QtWidgets import QLabel, QLineEdit, QPushButton as _Btn
-        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit
+        from PyQt6.QtWidgets import QPushButton as _Btn
 
         cfg_file = Path.home() / ".medral" / "config.json"
         try:
@@ -298,15 +297,20 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        cfg["host"] = host_edit.text().strip() or cfg["host"]
+        host = host_edit.text().strip() or cfg["host"]
         try:
-            cfg["port"] = int(port_edit.text().strip())
+            port = int(port_edit.text().strip())
         except ValueError:
-            pass
+            port = cfg.get("port", 8000)
 
+        cfg["host"] = host
+        cfg["port"] = port
         cfg_file.parent.mkdir(parents=True, exist_ok=True)
         cfg_file.write_text(json.dumps(cfg, indent=2))
 
-        self.client.stop()
-        subprocess.Popen([sys.executable] + sys.argv)
-        QApplication.quit()
+        # Reconnect in-place — no app restart needed
+        self._guild_id = None
+        self._guilds   = []
+        self._state    = {}
+        self.client.set_server(host, port)
+        self.statusBar().showMessage(f"Connecting to {host}:{port}…")

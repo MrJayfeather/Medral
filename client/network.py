@@ -38,6 +38,15 @@ class ApiClient(QObject):
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
 
+    def set_server(self, host: str, port: int) -> None:
+        """Switch to a different server without restarting the app."""
+        self.stop()
+        if self._thread:
+            self._thread.join(timeout=3)
+        self._base   = f"http://{host}:{port}"
+        self._ws_url = f"ws://{host}:{port}/ws"
+        self.start()
+
     # ── background event loop ─────────────────────────────────────────────
 
     def _run(self) -> None:
