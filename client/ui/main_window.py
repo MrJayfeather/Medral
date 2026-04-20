@@ -114,8 +114,12 @@ class MainWindow(QMainWindow):
 
         change_btn = QPushButton("⚙")
         change_btn.setToolTip("Сменить сервер")
-        change_btn.setFixedSize(28, 28)
-        change_btn.setStyleSheet("background:transparent; border:none; color:#7d8590; font-size:16px;")
+        change_btn.setFixedSize(32, 32)
+        change_btn.setStyleSheet(
+            "QPushButton { background:#21262d; border:1px solid #30363d; "
+            "border-radius:6px; color:#c9d1d9; font-size:15px; }"
+            "QPushButton:hover { background:#30363d; }"
+        )
         change_btn.clicked.connect(self._on_change_server)
         lay.addWidget(change_btn)
 
@@ -256,17 +260,53 @@ class MainWindow(QMainWindow):
     def _on_change_server(self) -> None:
         import json, sys, subprocess
         from pathlib import Path
-        from main import ConnectDialog, _load_config, _save_config
+        from PyQt6.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout
+        from PyQt6.QtWidgets import QLabel, QLineEdit, QPushButton as _Btn
+        from PyQt6.QtCore import Qt
 
-        cfg    = _load_config()
-        dialog = ConnectDialog(cfg)
-        if dialog.exec() != dialog.DialogCode.Accepted:
+        cfg_file = Path.home() / ".medral" / "config.json"
+        try:
+            cfg = json.loads(cfg_file.read_text())
+        except Exception:
+            cfg = {"host": "89.124.90.59", "port": 8000}
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Сменить сервер")
+        dlg.setFixedSize(340, 160)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(10)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Host"))
+        host_edit = QLineEdit(cfg.get("host", "89.124.90.59"))
+        row1.addWidget(host_edit)
+        lay.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Port"))
+        port_edit = QLineEdit(str(cfg.get("port", 8000)))
+        row2.addWidget(port_edit)
+        lay.addLayout(row2)
+
+        btns = QHBoxLayout()
+        cancel = _Btn("Отмена"); cancel.clicked.connect(dlg.reject)
+        ok = _Btn("Подключиться"); ok.setObjectName("primaryBtn"); ok.clicked.connect(dlg.accept)
+        btns.addWidget(cancel); btns.addWidget(ok)
+        lay.addLayout(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        cfg["host"] = dialog.result_host
-        cfg["port"] = dialog.result_port
-        _save_config(cfg)
+
+        cfg["host"] = host_edit.text().strip() or cfg["host"]
+        try:
+            cfg["port"] = int(port_edit.text().strip())
+        except ValueError:
+            pass
+
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(json.dumps(cfg, indent=2))
 
         self.client.stop()
-        from PyQt6.QtWidgets import QApplication
-        QApplication.quit()
         subprocess.Popen([sys.executable] + sys.argv)
+        QApplication.quit()
