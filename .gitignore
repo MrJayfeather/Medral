@@ -22,7 +22,6 @@ build/
 *.egg
 
 # PyInstaller
-*.spec
 *.exe
 *.app
 

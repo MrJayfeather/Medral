@@ -50,7 +50,7 @@ if not exist "venv\Scripts\activate.bat" (
 :: ---- activate and install deps ----
 call venv\Scripts\activate.bat
 echo [setup] Installing / updating dependencies...
-pip install -r requirements.txt -q
+pip install --pre -r requirements.txt -q
 if errorlevel 1 (
     echo [error] pip install failed.
     pause

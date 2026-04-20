@@ -1,0 +1,23 @@
+[Unit]
+Description=Medral Discord Music Bot + API Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=medral
+WorkingDirectory=/opt/medral/bot
+EnvironmentFile=/opt/medral/.env
+ExecStart=/opt/medral/venv/bin/python api.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=medral
+
+# Graceful stop
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

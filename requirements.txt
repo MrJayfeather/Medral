@@ -1,5 +1,6 @@
 # Server dependencies
-py-cord>=2.4.1
+py-cord>=2.8.0rc2
+davey>=0.1.5
 yt-dlp>=2024.1.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
