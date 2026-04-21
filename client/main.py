@@ -48,7 +48,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from styles          import STYLESHEET
 from network         import ApiClient
-from ui.main_window  import MainWindow
+from ui.main_window   import MainWindow
+from ui.splash_screen import SplashScreen
 
 
 # ── version ───────────────────────────────────────────────────────────────────
@@ -336,11 +337,22 @@ class ConnectDialog(QDialog):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+def _load_fonts() -> None:
+    """Try to load Syne + DM Sans from ~/.medral/fonts/ if present."""
+    from PyQt6.QtGui import QFontDatabase
+    fonts_dir = Path.home() / ".medral" / "fonts"
+    if fonts_dir.is_dir():
+        for f in fonts_dir.glob("*.ttf"):
+            QFontDatabase.addApplicationFont(str(f))
+
+
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Medral")
     app.setStyleSheet(STYLESHEET)
-    app.setFont(QFont("Segoe UI", 10))
+
+    _load_fonts()
+    app.setFont(QFont("DM Sans", 10))
 
     cfg  = _load_config()
     host = cfg.get("host", "89.124.90.59")
@@ -350,9 +362,15 @@ def main() -> None:
     client.start()
 
     window = MainWindow(client)
-    window.show()
 
-    QTimer.singleShot(800, client.fetch_guilds)
+    splash = SplashScreen()
+    splash.show()
+
+    def _on_splash_done() -> None:
+        window.show()
+        QTimer.singleShot(800, client.fetch_guilds)
+
+    splash.closed.connect(_on_splash_done)
 
     def _do_update_check():
         _check_update(host, port, CLIENT_VERSION)
@@ -361,7 +379,7 @@ def main() -> None:
             del UpdateDialog._pending
             UpdateDialog(*pending).exec()
 
-    QTimer.singleShot(3000, _do_update_check)
+    QTimer.singleShot(3500, _do_update_check)
 
     ret = app.exec()
     client.stop()

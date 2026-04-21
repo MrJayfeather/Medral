@@ -7,15 +7,12 @@ from PyQt6.QtGui import QKeyEvent
 
 
 class SearchPanel(QWidget):
-    """Search bar + collapsible top-5 results panel."""
-
-    # emitted when user wants to search (show results)
     search_submitted = pyqtSignal(str)
-    # emitted when user picks a result to play (webpage_url)
     play_requested   = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
         self._build_ui()
 
     # ── layout ────────────────────────────────────────────────────────────
@@ -25,7 +22,6 @@ class SearchPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
 
-        # ── search bar row ──
         bar = QHBoxLayout()
         bar.setSpacing(8)
 
@@ -44,9 +40,9 @@ class SearchPanel(QWidget):
 
         root.addLayout(bar)
 
-        # ── results area (hidden until results arrive) ──
         self._results_widget = QWidget()
         self._results_widget.setVisible(False)
+        self._results_widget.setStyleSheet("background: transparent;")
         r_lay = QVBoxLayout(self._results_widget)
         r_lay.setContentsMargins(0, 2, 0, 0)
         r_lay.setSpacing(4)
@@ -97,7 +93,7 @@ class SearchPanel(QWidget):
 # ── result row widget ──────────────────────────────────────────────────────
 
 class _ResultRow(QFrame):
-    play_clicked = pyqtSignal(str)  # webpage_url
+    play_clicked = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -110,24 +106,22 @@ class _ResultRow(QFrame):
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(12)
 
-        # track info
         info = QVBoxLayout()
         info.setSpacing(2)
 
         self._title = QLabel()
         self._title.setStyleSheet(
-            "font-size: 13px; font-weight: 600; color: #e6edf3;"
+            "font-size:13px; font-weight:600; color:#e8e8f5; background:transparent;"
         )
         self._title.setMaximumWidth(500)
         info.addWidget(self._title)
 
         self._meta = QLabel()
-        self._meta.setStyleSheet("font-size: 11px; color: #7d8590;")
+        self._meta.setStyleSheet("font-size:11px; color:#6b6b8a; background:transparent;")
         info.addWidget(self._meta)
 
         lay.addLayout(info, 1)
 
-        # play button
         btn = QPushButton("▶")
         btn.setObjectName("resultPlayBtn")
         btn.setFixedSize(32, 32)
@@ -136,11 +130,11 @@ class _ResultRow(QFrame):
         lay.addWidget(btn)
 
     def set_track(self, track: dict) -> None:
-        self._url   = track.get("webpage_url", "")
-        title       = track.get("title",  "Unknown Title")
-        artist      = track.get("artist", "Unknown Artist")
-        dur         = int(track.get("duration") or 0)
-        m, s        = divmod(dur, 60)
+        self._url = track.get("webpage_url", "")
+        title  = track.get("title",  "Unknown Title")
+        artist = track.get("artist", "Unknown Artist")
+        dur    = int(track.get("duration") or 0)
+        m, s   = divmod(dur, 60)
 
         self._title.setText(_elide(title, 60))
         self._title.setToolTip(title)

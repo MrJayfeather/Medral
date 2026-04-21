@@ -8,13 +8,14 @@ from PyQt6.QtGui import QAction
 
 
 class QueuePanel(QWidget):
-    remove_requested = pyqtSignal(int)       # index in queue
-    move_requested   = pyqtSignal(int, int)  # from_index, to_index
+    remove_requested = pyqtSignal(int)
+    move_requested   = pyqtSignal(int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
         self._tracks:   list[dict] = []
-        self._no_signal = False     # guard against recursive rowsMoved
+        self._no_signal = False
         self._build_ui()
 
     # ── layout ────────────────────────────────────────────────────────────
@@ -24,18 +25,16 @@ class QueuePanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
 
-        # header row
         hdr = QHBoxLayout()
         title = QLabel("QUEUE")
         title.setObjectName("sectionTitle")
         self._count = QLabel("")
-        self._count.setStyleSheet("color:#7d8590; font-size:11px;")
+        self._count.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
         hdr.addWidget(title)
         hdr.addStretch()
         hdr.addWidget(self._count)
         root.addLayout(hdr)
 
-        # list
         self._list = QListWidget()
         self._list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._list.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -44,8 +43,6 @@ class QueuePanel(QWidget):
         self._list.customContextMenuRequested.connect(self._context_menu)
         self._list.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._list.setSpacing(1)
-
-        # detect internal-move drag-drop via model signal
         self._list.model().rowsMoved.connect(self._on_rows_moved)
 
         root.addWidget(self._list, 1)
@@ -61,7 +58,6 @@ class QueuePanel(QWidget):
     # ── private ───────────────────────────────────────────────────────────
 
     def _rebuild(self) -> None:
-        """Full list rebuild from self._tracks (preserves selection row)."""
         self._no_signal = True
         sel = self._list.currentRow()
         self._list.clear()
@@ -89,11 +85,9 @@ class QueuePanel(QWidget):
         if self._no_signal:
             return
         from_idx = src_start
-        # Qt inserts before dst_row, so if moving down the effective index is dst_row-1
         to_idx = (dst_row - 1) if dst_row > src_start else dst_row
         if from_idx == to_idx:
             return
-        # Optimistic local reorder so widgets don't flicker while waiting for WS
         track = self._tracks.pop(from_idx)
         self._tracks.insert(to_idx, track)
         self._rebuild()
@@ -127,7 +121,7 @@ class QueuePanel(QWidget):
 # ── individual row widget ──────────────────────────────────────────────────
 
 class _QueueRow(QWidget):
-    remove_clicked = pyqtSignal(int)  # index
+    remove_clicked = pyqtSignal(int)
 
     def __init__(self, index: int, track: dict, parent=None) -> None:
         super().__init__(parent)
@@ -137,14 +131,12 @@ class _QueueRow(QWidget):
         lay.setContentsMargins(12, 0, 8, 0)
         lay.setSpacing(10)
 
-        # index number
         num = QLabel(str(index + 1))
         num.setFixedWidth(22)
         num.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        num.setStyleSheet("color:#7d8590; font-size:11px;")
+        num.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
         lay.addWidget(num)
 
-        # title + artist
         info = QVBoxLayout()
         info.setSpacing(2)
 
@@ -154,23 +146,22 @@ class _QueueRow(QWidget):
         m, s   = divmod(dur, 60)
 
         t_lbl = QLabel(_elide(title, 52))
-        t_lbl.setStyleSheet("font-size:13px; font-weight:500; color:#e6edf3;")
+        t_lbl.setStyleSheet("font-size:13px; font-weight:500; color:#e8e8f5; background:transparent;")
         t_lbl.setToolTip(title)
         info.addWidget(t_lbl)
 
         sub = QLabel(f"{_elide(artist, 30)}  •  {m}:{s:02d}")
-        sub.setStyleSheet("font-size:11px; color:#7d8590;")
+        sub.setStyleSheet("font-size:11px; color:#6b6b8a; background:transparent;")
         info.addWidget(sub)
 
         lay.addLayout(info, 1)
 
-        # remove button
         rm = QPushButton("✕")
         rm.setFixedSize(22, 22)
         rm.setStyleSheet(
-            "QPushButton { background:transparent; color:#7d8590; border:none;"
+            "QPushButton { background:transparent; color:#6b6b8a; border:none;"
             "              font-size:11px; border-radius:11px; }"
-            "QPushButton:hover { color:#f85149; background:rgba(248,81,73,0.12); }"
+            "QPushButton:hover { color:#f87171; background:rgba(248,113,113,0.12); }"
         )
         rm.clicked.connect(lambda: self.remove_clicked.emit(self._idx))
         lay.addWidget(rm)

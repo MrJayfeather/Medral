@@ -1,10 +1,14 @@
+import math
+import random
 import time
 
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl
-from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl, QPointF, QRect
+from PyQt6.QtGui import (
+    QPixmap, QPainter, QPainterPath, QColor, QLinearGradient, QRadialGradient,
+)
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 
@@ -13,7 +17,7 @@ def _fmt(seconds: int) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
-def _rounded_pixmap(px: QPixmap, r: int = 10) -> QPixmap:
+def _rounded_pixmap(px: QPixmap, r: int = 12) -> QPixmap:
     out = QPixmap(px.size())
     out.fill(Qt.GlobalColor.transparent)
     p = QPainter(out)
@@ -26,12 +30,69 @@ def _rounded_pixmap(px: QPixmap, r: int = 10) -> QPixmap:
     return out
 
 
+class _EqWidget(QWidget):
+    """18-bar animated equalizer visualizer."""
+
+    _N = 18
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(36)
+        self._active  = False
+        self._heights = [0.05] * self._N
+        self._targets = [0.05] * self._N
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._tick)
+
+    def set_active(self, active: bool) -> None:
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self._heights = [0.05] * self._N
+            self.update()
+
+    def _tick(self) -> None:
+        for i in range(self._N):
+            self._targets[i] = random.uniform(0.08, 1.0)
+            self._heights[i] += (self._targets[i] - self._heights[i]) * 0.35
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+        n = self._N
+        gap = 2
+        bar_w = max(2, (w - gap * (n - 1)) // n)
+        total_w = n * bar_w + gap * (n - 1)
+        x0 = (w - total_w) // 2
+
+        for i in range(n):
+            bh = max(3, int(self._heights[i] * (h - 2)))
+            x = x0 + i * (bar_w + gap)
+            y = h - bh
+
+            grad = QLinearGradient(x, y, x, h)
+            grad.setColorAt(0.0, QColor(108, 99, 255, 220))
+            grad.setColorAt(1.0, QColor(167, 139, 250, 100))
+            p.fillRect(x, y, bar_w, bh, grad)
+
+        p.end()
+
+
 class PlayerPanel(QFrame):
     play_pause_clicked = pyqtSignal()
     skip_clicked       = pyqtSignal()
     previous_clicked   = pyqtSignal()
-    volume_changed     = pyqtSignal(float)   # 0.0–1.0
-    seek_requested     = pyqtSignal(float)   # seconds
+    volume_changed     = pyqtSignal(float)
+    seek_requested     = pyqtSignal(float)
 
     _ART_SIZE = 150
 
@@ -64,7 +125,7 @@ class PlayerPanel(QFrame):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setSpacing(12)
 
         # ── track info row ──
         info_row = QHBoxLayout()
@@ -74,8 +135,9 @@ class PlayerPanel(QFrame):
         self._art.setFixedSize(self._ART_SIZE, self._ART_SIZE)
         self._art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._art.setStyleSheet(
-            f"background:#21262d; border-radius:10px;"
-            f" font-size:40px; color:#7d8590;"
+            f"background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            f"stop:0 #16162a, stop:1 #0e0e1a);"
+            f" border-radius:12px; font-size:40px; color:#6b6b8a;"
         )
         info_row.addWidget(self._art)
 
@@ -93,7 +155,10 @@ class PlayerPanel(QFrame):
         self._artist.setObjectName("trackArtist")
         meta.addWidget(self._artist)
 
-        meta.addSpacing(8)
+        meta.addSpacing(10)
+
+        self._eq = _EqWidget()
+        meta.addWidget(self._eq)
 
         meta.addStretch()
         info_row.addLayout(meta, 1)
@@ -144,7 +209,6 @@ class PlayerPanel(QFrame):
 
         ctrl.addStretch()
 
-        # volume
         vol_icon = QLabel("🔊")
         vol_icon.setStyleSheet("background:transparent; font-size:15px;")
         ctrl.addWidget(vol_icon)
@@ -185,6 +249,7 @@ class PlayerPanel(QFrame):
         self._is_playing = state.get("is_playing", False)
         self._is_paused  = state.get("is_paused",  False)
         self._play_btn.setText("⏸" if self._is_playing else "▶")
+        self._eq.set_active(self._is_playing and not self._is_paused)
 
         pos = float(state.get("position") or 0.0)
         self._position = pos
@@ -220,9 +285,11 @@ class PlayerPanel(QFrame):
         self._art.clear()
         self._art.setText("♪")
         self._art.setStyleSheet(
-            f"background:#21262d; border-radius:10px;"
-            f" font-size:40px; color:#7d8590;"
+            f"background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            f"stop:0 #16162a, stop:1 #0e0e1a);"
+            f" border-radius:12px; font-size:40px; color:#6b6b8a;"
         )
+        self._eq.set_active(False)
         self._tick_timer.stop()
 
     def _tick(self) -> None:
@@ -240,12 +307,10 @@ class PlayerPanel(QFrame):
         if self._duration > 0:
             self._position = self._progress.value() / 1000 * self._duration
             self._elapsed.setText(_fmt(self._position))
-            # Debounce: send seek only after slider is stable for 300 ms
             self._seek_timer.start(300)
 
     def _do_seek(self) -> None:
         self.seek_requested.emit(self._position)
-        # Block state_update from snapping slider back for 2.5 s
         QTimer.singleShot(2500, self._end_seek_lock)
 
     def _end_seek_lock(self) -> None:
@@ -260,13 +325,12 @@ class PlayerPanel(QFrame):
         if px.loadFromData(data):
             s = self._ART_SIZE
             px = px.scaled(s, s,
-                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                            Qt.TransformationMode.SmoothTransformation)
-            # centre-crop to square
+                           Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                           Qt.TransformationMode.SmoothTransformation)
             x = (px.width()  - s) // 2
             y = (px.height() - s) // 2
             px = px.copy(x, y, s, s)
-            px = _rounded_pixmap(px, r=10)
+            px = _rounded_pixmap(px, r=12)
             self._art.setPixmap(px)
             self._art.setStyleSheet("background:transparent;")
         reply.deleteLater()

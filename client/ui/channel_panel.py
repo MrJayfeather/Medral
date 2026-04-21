@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QPushButton, QWidget,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QColor
 
 
 class ChannelPanel(QFrame):
@@ -16,9 +16,9 @@ class ChannelPanel(QFrame):
         self.setObjectName("leftPanel")
         self.setFixedWidth(220)
 
-        self._guild_id:           int | None  = None
-        self._channels:           list[dict]  = []
-        self._connected_ch_id:    int | None  = None
+        self._guild_id:        int | None = None
+        self._channels:        list[dict] = []
+        self._connected_ch_id: int | None = None
 
         self._build_ui()
 
@@ -97,14 +97,11 @@ class ChannelPanel(QFrame):
                       and int(ch["id"]) == self._connected_ch_id)
             text = f"  🔊  {ch['name']}"
             item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, str(ch["id"]))  # store as str, Qt truncates large ints
+            item.setData(Qt.ItemDataRole.UserRole, str(ch["id"]))
             if active:
-                item.setForeground(
-                    __import__("PyQt6.QtGui", fromlist=["QColor"]).QColor("#58a6ff")
-                )
+                item.setForeground(QColor("#6C63FF"))
                 item.setFont(_bold_font())
             self._list.addItem(item)
-
 
     def _refresh_btn(self) -> None:
         if self._connected_ch_id is not None:
@@ -113,7 +110,6 @@ class ChannelPanel(QFrame):
         else:
             self._action_btn.setText("Connect Bot")
             self._action_btn.setObjectName("connectBtn")
-        # force stylesheet re-polish
         self._action_btn.style().unpolish(self._action_btn)
         self._action_btn.style().polish(self._action_btn)
 
@@ -127,7 +123,7 @@ class ChannelPanel(QFrame):
         if item:
             self.join_requested.emit(
                 self._guild_id,
-                int(item.data(Qt.ItemDataRole.UserRole)),  # data is str, safe to int()
+                int(item.data(Qt.ItemDataRole.UserRole)),
             )
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
@@ -138,7 +134,7 @@ class ChannelPanel(QFrame):
             return
         self.join_requested.emit(
             self._guild_id,
-            int(item.data(Qt.ItemDataRole.UserRole)),  # data is str, safe to int()
+            int(item.data(Qt.ItemDataRole.UserRole)),
         )
 
 

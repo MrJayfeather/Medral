@@ -5,10 +5,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSlot, QTimer
 
 from network import ApiClient
-from ui.channel_panel import ChannelPanel
-from ui.search_panel   import SearchPanel
-from ui.player_panel   import PlayerPanel
-from ui.queue_panel    import QueuePanel
+from ui.background_widget import BackgroundWidget
+from ui.channel_panel      import ChannelPanel
+from ui.search_panel       import SearchPanel
+from ui.player_panel       import PlayerPanel
+from ui.queue_panel        import QueuePanel
 
 
 class MainWindow(QMainWindow):
@@ -16,10 +17,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.client = client
 
-        self._guild_id:  int | None  = None
-        self._guilds:    list[dict]  = []
-        # cache last received state for play/pause toggle logic
-        self._state:     dict        = {}
+        self._guild_id: int | None = None
+        self._guilds:   list[dict] = []
+        self._state:    dict       = {}
 
         self.setWindowTitle("Medral")
         self.setMinimumSize(960, 620)
@@ -33,6 +33,11 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
+
+        # Animated background — sits below everything
+        self._bg = BackgroundWidget(central)
+        self._bg.lower()
+
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -43,17 +48,19 @@ class MainWindow(QMainWindow):
 
         # right column
         right = QWidget()
+        right.setStyleSheet("background: transparent;")
         r_lay = QVBoxLayout(right)
         r_lay.setContentsMargins(0, 0, 0, 0)
         r_lay.setSpacing(0)
 
         r_lay.addWidget(self._make_top_bar())
 
-        # vertical splitter: upper (search+player) / lower (queue)
         vsplit = QSplitter(Qt.Orientation.Vertical)
         vsplit.setChildrenCollapsible(False)
+        vsplit.setStyleSheet("background: transparent;")
 
         upper = QWidget()
+        upper.setStyleSheet("background: transparent;")
         u_lay = QVBoxLayout(upper)
         u_lay.setContentsMargins(20, 16, 20, 12)
         u_lay.setSpacing(14)
@@ -67,6 +74,7 @@ class MainWindow(QMainWindow):
         vsplit.addWidget(upper)
 
         lower = QWidget()
+        lower.setStyleSheet("background: transparent;")
         l_lay = QVBoxLayout(lower)
         l_lay.setContentsMargins(20, 8, 20, 12)
         l_lay.setSpacing(0)
@@ -91,14 +99,14 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(20, 0, 20, 0)
         lay.setSpacing(12)
 
-        logo = QLabel("♪  Medral")
+        logo = QLabel("♪  MEDRAL")
         logo.setObjectName("logo")
         lay.addWidget(logo)
 
         lay.addStretch()
 
         srv = QLabel("Server:")
-        srv.setStyleSheet("color:#7d8590; background:transparent;")
+        srv.setStyleSheet("color:#6b6b8a; background:transparent;")
         lay.addWidget(srv)
 
         self._guild_combo = QComboBox()
@@ -108,17 +116,17 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._guild_combo)
 
         self._dot = QLabel("●")
-        self._dot.setStyleSheet("color:#f85149; font-size:14px; background:transparent;")
+        self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
         self._dot.setToolTip("WebSocket disconnected")
         lay.addWidget(self._dot)
 
         change_btn = QPushButton("⚙")
-        change_btn.setToolTip("Сменить сервер")
+        change_btn.setToolTip("Change server")
         change_btn.setFixedSize(32, 32)
         change_btn.setStyleSheet(
-            "QPushButton { background:#21262d; border:1px solid #30363d; "
-            "border-radius:6px; color:#c9d1d9; font-size:15px; }"
-            "QPushButton:hover { background:#30363d; }"
+            "QPushButton { background:#16162a; border:1px solid #2a2a40;"
+            " border-radius:8px; color:#e8e8f5; font-size:15px; }"
+            "QPushButton:hover { background:#1e1e32; border-color:#6C63FF; }"
         )
         change_btn.clicked.connect(self._on_change_server)
         lay.addWidget(change_btn)
@@ -128,7 +136,6 @@ class MainWindow(QMainWindow):
     # ── connect signals ───────────────────────────────────────────────────
 
     def _connect_signals(self) -> None:
-        # network → UI
         self.client.state_updated.connect(self._on_state)
         self.client.guilds_updated.connect(self._on_guilds)
         self.client.search_results_ready.connect(self.search_panel.show_results)
@@ -136,7 +143,6 @@ class MainWindow(QMainWindow):
         self.client.ws_disconnected.connect(self._on_ws_down)
         self.client.request_error.connect(self._on_error)
 
-        # panels → network
         self.ch_panel.join_requested.connect(
             lambda g, c: self.client.join(g, c)
         )
@@ -174,7 +180,7 @@ class MainWindow(QMainWindow):
     def _on_state(self, state: dict) -> None:
         gid = state.get("guild_id")
         if gid and self._guild_id is not None and str(self._guild_id) != str(gid):
-            return  # belongs to a different guild
+            return
         self._state = state
         self.ch_panel.update_state(state)
         self.player_panel.update_state(state)
@@ -195,11 +201,9 @@ class MainWindow(QMainWindow):
             return
 
         if self._guild_id is None:
-            # First load — select first guild
             self._guild_combo.setCurrentIndex(0)
             self._on_guild_changed(0)
         else:
-            # Reconnect — restore the previously selected guild
             restore_idx = next(
                 (i for i, g in enumerate(guilds) if int(g["id"]) == self._guild_id),
                 0,
@@ -224,14 +228,14 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_ws_up(self) -> None:
-        self._dot.setStyleSheet("color:#3fb950; font-size:14px; background:transparent;")
+        self._dot.setStyleSheet("color:#34d399; font-size:14px; background:transparent;")
         self._dot.setToolTip("Connected")
         self.statusBar().showMessage("Connected", 3000)
         self.client.fetch_guilds()
 
     @pyqtSlot()
     def _on_ws_down(self) -> None:
-        self._dot.setStyleSheet("color:#f85149; font-size:14px; background:transparent;")
+        self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
         self._dot.setToolTip("Disconnected — retrying…")
         self.statusBar().showMessage("Disconnected — reconnecting…")
 
@@ -258,7 +262,6 @@ class MainWindow(QMainWindow):
             self.client.resume(self._guild_id)
         elif self._state.get("is_playing"):
             self.client.pause(self._guild_id)
-        # if nothing is playing, ignore (user should search first)
 
     def _on_change_server(self) -> None:
         import json
@@ -273,7 +276,7 @@ class MainWindow(QMainWindow):
             cfg = {"host": "89.124.90.59", "port": 8000}
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Сменить сервер")
+        dlg.setWindowTitle("Change server")
         dlg.setFixedSize(340, 160)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(24, 20, 24, 20)
@@ -292,9 +295,13 @@ class MainWindow(QMainWindow):
         lay.addLayout(row2)
 
         btns = QHBoxLayout()
-        cancel = _Btn("Отмена"); cancel.clicked.connect(dlg.reject)
-        ok = _Btn("Подключиться"); ok.setObjectName("primaryBtn"); ok.clicked.connect(dlg.accept)
-        btns.addWidget(cancel); btns.addWidget(ok)
+        cancel = _Btn("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        ok = _Btn("Connect")
+        ok.setObjectName("primaryBtn")
+        ok.clicked.connect(dlg.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
         lay.addLayout(btns)
 
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -311,9 +318,15 @@ class MainWindow(QMainWindow):
         cfg_file.parent.mkdir(parents=True, exist_ok=True)
         cfg_file.write_text(json.dumps(cfg, indent=2))
 
-        # Reconnect in-place — no app restart needed
         self._guild_id = None
         self._guilds   = []
         self._state    = {}
         self.client.set_server(host, port)
         self.statusBar().showMessage(f"Connecting to {host}:{port}…")
+
+    # ── resize ────────────────────────────────────────────────────────────
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_bg"):
+            self._bg.resize(self.centralWidget().size())
