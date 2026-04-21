@@ -217,7 +217,6 @@ class MusicPlayer:
 
         self.voice_client.play(source, after=_after)
         await self._on_state_change(self.guild_id)
-            self._paused = False
 
     def skip(self) -> None:
         if self.voice_client and (
