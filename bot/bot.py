@@ -464,6 +464,12 @@ async def api_set_volume(guild_id: int, volume: float) -> dict:
     return {"ok": True}
 
 
+async def api_seek(guild_id: int, position: float) -> dict:
+    p = _player(guild_id)
+    await p.seek(position)
+    return {"ok": True}
+
+
 async def api_remove_from_queue(guild_id: int, index: int) -> dict:
     p = _player(guild_id)
     ok = p.remove_from_queue(index)

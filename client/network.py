@@ -172,6 +172,9 @@ class ApiClient(QObject):
     def set_volume(self, guild_id: int, volume: float) -> None:
         self._submit(self._post("/volume", {"guild_id": guild_id, "volume": volume}))
 
+    def seek(self, guild_id: int, position: float) -> None:
+        self._submit(self._post("/seek", {"guild_id": guild_id, "position": position}))
+
     # queue
     def remove_from_queue(self, guild_id: int, index: int) -> None:
         self._submit(self._post("/queue/remove", {"guild_id": guild_id, "index": index}))

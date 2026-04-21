@@ -158,6 +158,11 @@ class GuildBody(BaseModel):
     guild_id: int
 
 
+class SeekBody(BaseModel):
+    guild_id: int
+    position: float  # seconds
+
+
 class VolumeBody(BaseModel):
     guild_id: int
     volume: float   # 0.0 – 1.0
@@ -253,6 +258,11 @@ async def stop(body: GuildBody):
 @app.post("/volume")
 async def set_volume(body: VolumeBody):
     return await music_bot.api_set_volume(body.guild_id, body.volume)
+
+
+@app.post("/seek")
+async def seek(body: SeekBody):
+    return await music_bot.api_seek(body.guild_id, body.position)
 
 
 # ------------------------------------------------------------------ search

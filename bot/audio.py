@@ -97,11 +97,13 @@ class MusicPlayer:
         self._volume: float = 0.5
         self._paused: bool = False
         self._intentional_stop: bool = False
+        self._seeking: bool = False
 
         # progress tracking
         self._play_started_at: float = 0.0
         self._pause_started_at: float = 0.0
         self._total_paused: float = 0.0
+        self._current_stream_url: str = ""
 
     # ------------------------------------------------------------------ props
 
@@ -150,6 +152,7 @@ class MusicPlayer:
         self._total_paused = 0.0
 
         stream_url = await get_stream_url(self.current)
+        self._current_stream_url = stream_url
 
         raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
         source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
@@ -160,7 +163,8 @@ class MusicPlayer:
         def _after(error: Optional[Exception]) -> None:
             if error:
                 print(f"[audio] playback error: {error}")
-            loop.create_task(self.play_next())
+            if not self._seeking:
+                loop.create_task(self.play_next())
 
         self.voice_client.play(source, after=_after)
         await self._on_state_change(self.guild_id)
@@ -177,6 +181,42 @@ class MusicPlayer:
         if self.voice_client and self.voice_client.is_paused():
             self.voice_client.resume()
             self._total_paused += time.time() - self._pause_started_at
+
+    async def seek(self, position: float) -> None:
+        if not self.current or not self.voice_client or not self.voice_client.is_connected():
+            return
+        if not self._current_stream_url:
+            return
+        position = max(0.0, position)
+
+        self._seeking = True
+        if self.voice_client.is_playing() or self.voice_client.is_paused():
+            self.voice_client.stop()
+
+        seek_opts = {
+            "before_options": (
+                f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {position:.2f}"
+            ),
+            "options": "-vn -ar 48000 -ac 2",
+        }
+        raw_source = discord.FFmpegPCMAudio(self._current_stream_url, **seek_opts)
+        source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
+
+        self._play_started_at = time.time() - position
+        self._total_paused = 0.0
+        self._paused = False
+        self._seeking = False
+
+        loop = asyncio.get_running_loop()
+
+        def _after(error: Optional[Exception]) -> None:
+            if error:
+                print(f"[audio] playback error: {error}")
+            if not self._seeking:
+                loop.create_task(self.play_next())
+
+        self.voice_client.play(source, after=_after)
+        await self._on_state_change(self.guild_id)
             self._paused = False
 
     def skip(self) -> None:

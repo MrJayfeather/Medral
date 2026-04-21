@@ -31,6 +31,7 @@ class PlayerPanel(QFrame):
     skip_clicked       = pyqtSignal()
     previous_clicked   = pyqtSignal()
     volume_changed     = pyqtSignal(float)   # 0.0–1.0
+    seek_requested     = pyqtSignal(float)   # seconds
 
     _ART_SIZE = 150
 
@@ -236,6 +237,7 @@ class PlayerPanel(QFrame):
         if self._duration > 0:
             self._position = self._progress.value() / 1000 * self._duration
             self._elapsed.setText(_fmt(self._position))
+            self.seek_requested.emit(self._position)
 
     def _on_image_loaded(self, reply: QNetworkReply) -> None:
         if reply.error() != QNetworkReply.NetworkError.NoError:

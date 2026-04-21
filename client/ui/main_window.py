@@ -157,6 +157,9 @@ class MainWindow(QMainWindow):
         self.player_panel.volume_changed.connect(
             lambda v: self._guild_id and self.client.set_volume(self._guild_id, v)
         )
+        self.player_panel.seek_requested.connect(
+            lambda pos: self._guild_id and self.client.seek(self._guild_id, pos)
+        )
 
         self.queue_panel.remove_requested.connect(
             lambda i: self._guild_id and self.client.remove_from_queue(self._guild_id, i)
