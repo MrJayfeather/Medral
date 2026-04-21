@@ -16,6 +16,15 @@ YTDL_OPTS = {
     "extract_flat": False,
 }
 
+# Faster opts for search — flat extraction skips visiting each video page
+YTDL_SEARCH_OPTS = {
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "source_address": "0.0.0.0",
+    "extract_flat": True,
+}
+
 FFMPEG_OPTIONS = {
     "before_options": (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
@@ -67,11 +76,13 @@ def _entry_to_track(entry: dict) -> Track:
 async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
     if query.startswith("http://") or query.startswith("https://"):
         search_query = query
+        opts = YTDL_OPTS          # URL — нужна полная инфа
     else:
         search_query = f"ytsearch{max_results}:{query}"
+        opts = YTDL_SEARCH_OPTS   # текстовый запрос — плоский, быстрый
 
     try:
-        data = await _yt_extract(YTDL_OPTS, search_query)
+        data = await _yt_extract(opts, search_query)
     except Exception as exc:
         print(f"[search] yt-dlp error for {search_query!r}: {exc}")
         return []

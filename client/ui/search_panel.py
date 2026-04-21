@@ -61,6 +61,7 @@ class SearchPanel(QWidget):
 
     def show_results(self, tracks: list[dict]) -> None:
         has = bool(tracks)
+        self._set_loading(False)
         self._results_widget.setVisible(has)
         for i, row in enumerate(self._result_rows):
             if i < len(tracks):
@@ -72,6 +73,15 @@ class SearchPanel(QWidget):
     def clear(self) -> None:
         self._input.clear()
         self._results_widget.setVisible(False)
+        self._set_loading(False)
+
+    def set_loading(self) -> None:
+        self._set_loading(True)
+
+    def _set_loading(self, loading: bool) -> None:
+        self._btn.setText("…" if loading else "Search")
+        self._btn.setEnabled(not loading)
+        self._input.setEnabled(not loading)
 
     # ── slots ─────────────────────────────────────────────────────────────
 

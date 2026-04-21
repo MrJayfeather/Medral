@@ -247,6 +247,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_search(self, query: str) -> None:
+        self.search_panel.set_loading()
         self.client.search(query)
 
     @pyqtSlot(str)
