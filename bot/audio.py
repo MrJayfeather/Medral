@@ -70,9 +70,25 @@ async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
     else:
         search_query = f"ytsearch{max_results}:{query}"
 
-    data = await _yt_extract(YTDL_OPTS, search_query)
+    try:
+        data = await _yt_extract(YTDL_OPTS, search_query)
+    except Exception as exc:
+        print(f"[search] yt-dlp error for {search_query!r}: {exc}")
+        return []
+
+    if not data:
+        return []
+
     entries = data.get("entries", [data]) if "entries" in data else [data]
-    return [_entry_to_track(e) for e in entries if e][:max_results]
+    tracks = []
+    for e in entries:
+        if not e:
+            continue
+        try:
+            tracks.append(_entry_to_track(e))
+        except Exception as exc:
+            print(f"[search] entry parse error: {exc}")
+    return tracks[:max_results]
 
 
 async def get_stream_url(track: Track) -> str:

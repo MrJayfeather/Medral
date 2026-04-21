@@ -98,7 +98,10 @@ class ApiClient(QObject):
             async with self._session.post(
                 f"{self._base}{path}", json=body, timeout=aiohttp.ClientTimeout(total=10)
             ) as r:
-                return await r.json()
+                if r.status >= 400:
+                    self.request_error.emit(f"Server error {r.status} on {path}")
+                    return None
+                return await r.json(content_type=None)
         except Exception as exc:
             self.request_error.emit(str(exc))
             return None
@@ -110,7 +113,10 @@ class ApiClient(QObject):
             async with self._session.get(
                 f"{self._base}{path}", params=params, timeout=aiohttp.ClientTimeout(total=10)
             ) as r:
-                return await r.json()
+                if r.status >= 400:
+                    self.request_error.emit(f"Server error {r.status} on {path}")
+                    return None
+                return await r.json(content_type=None)
         except Exception as exc:
             self.request_error.emit(str(exc))
             return None
