@@ -45,6 +45,9 @@ class PlayerPanel(QFrame):
         self._position     = 0.0
         self._seeking      = False
         self._thumb_url    = ""
+        self._seek_timer   = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.timeout.connect(self._do_seek)
 
         self._nam = QNetworkAccessManager(self)
         self._nam.finished.connect(self._on_image_loaded)
@@ -231,13 +234,22 @@ class PlayerPanel(QFrame):
 
     def _on_seek_press(self) -> None:
         self._seeking = True
+        self._seek_timer.stop()
 
     def _on_seek_release(self) -> None:
-        self._seeking = False
         if self._duration > 0:
             self._position = self._progress.value() / 1000 * self._duration
             self._elapsed.setText(_fmt(self._position))
-            self.seek_requested.emit(self._position)
+            # Debounce: send seek only after slider is stable for 300 ms
+            self._seek_timer.start(300)
+
+    def _do_seek(self) -> None:
+        self.seek_requested.emit(self._position)
+        # Block state_update from snapping slider back for 2.5 s
+        QTimer.singleShot(2500, self._end_seek_lock)
+
+    def _end_seek_lock(self) -> None:
+        self._seeking = False
 
     def _on_image_loaded(self, reply: QNetworkReply) -> None:
         if reply.error() != QNetworkReply.NetworkError.NoError:

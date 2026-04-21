@@ -192,6 +192,7 @@ class MusicPlayer:
         self._seeking = True
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             self.voice_client.stop()
+            await asyncio.sleep(0.15)  # let _after fire before we start new source
 
         seek_opts = {
             "before_options": (
