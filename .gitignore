@@ -15,6 +15,10 @@ ENV/
 # Environment variables — never commit secrets
 .env
 
+# Auth session store — contains live session tokens
+sessions.json
+sessions.json.tmp
+
 # Distribution / packaging
 dist/
 build/

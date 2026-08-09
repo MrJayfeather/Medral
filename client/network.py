@@ -16,6 +16,8 @@ class ApiClient(QObject):
     ws_connected         = pyqtSignal()
     ws_disconnected      = pyqtSignal()
     request_error        = pyqtSignal(str)
+    auth_required        = pyqtSignal()        # HTTP 401 или WS close 4401
+    auth_ok              = pyqtSignal(dict)    # ответ /auth/me: {"user_id","username"}
 
     def __init__(self, host: str, port: int) -> None:
         super().__init__()
@@ -28,6 +30,10 @@ class ApiClient(QObject):
         # bumped on every stop(): a listener that outlived join(timeout=3)
         # sees the mismatch and exits instead of racing the new thread
         self._generation = 0
+        self._token: Optional[str] = None
+        # set on WS close 4401: the listener stops reconnecting until
+        # set_token() is called (otherwise — infinite 4401 loop)
+        self._auth_blocked = False
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -49,7 +55,13 @@ class ApiClient(QObject):
             self._thread.join(timeout=3)
         self._base   = f"http://{host}:{port}"
         self._ws_url = f"ws://{host}:{port}/ws"
+        self._auth_blocked = False   # новый сервер — новая попытка
         self.start()
+
+    def set_token(self, token: Optional[str]) -> None:
+        """Set (or clear with None) the session token for HTTP and WS."""
+        self._token = token
+        self._auth_blocked = False   # снимаем блок реконнекта WS
 
     # ── background event loop ─────────────────────────────────────────────
 
@@ -81,9 +93,15 @@ class ApiClient(QObject):
         generation = self._generation
         retry = 2.0
         while self._running and generation == self._generation:
+            if self._auth_blocked:
+                # 4401: не реконнектимся, пока не появится новый токен
+                await asyncio.sleep(1.0)
+                continue
+            tok = self._token
+            url = self._ws_url + (f"?token={tok}" if tok else "")
             try:
                 async with websockets.connect(
-                    self._ws_url,
+                    url,
                     ping_interval=None,   # server sends JSON {"type":"ping"} every 25 s
                     open_timeout=10,
                 ) as ws:
@@ -102,22 +120,43 @@ class ApiClient(QObject):
                         if msg_type == "state_update":
                             self.state_updated.emit(data)
                         # "ping" messages from server are ignored (keepalive only)
+            except websockets.exceptions.ConnectionClosed as e:
+                rcvd = getattr(e, "rcvd", None)
+                if rcvd is not None and getattr(rcvd, "code", None) == 4401:
+                    # блокируем, только если токен не сменился, пока соединение
+                    # жило (иначе 4401 по старому токену заблокирует новый)
+                    if tok == self._token:
+                        self._auth_blocked = True
+                        self.auth_required.emit()
             except Exception:
                 pass
             if self._running and generation == self._generation:
                 self.ws_disconnected.emit()
+                if self._auth_blocked:
+                    continue          # наверх — ждать новый токен
                 await asyncio.sleep(retry)
                 retry = min(retry * 1.5, 30.0)
 
     # ── internal HTTP helpers ─────────────────────────────────────────────
 
-    async def _post(self, path: str, body: dict, timeout: float = 10) -> Optional[dict]:
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+
+    async def _post(
+        self, path: str, body: dict, timeout: float = 10,
+        headers: Optional[dict] = None,
+    ) -> Optional[dict]:
         if self._session is None:
             return None
         try:
             async with self._session.post(
-                f"{self._base}{path}", json=body, timeout=aiohttp.ClientTimeout(total=timeout)
+                f"{self._base}{path}", json=body,
+                headers=self._headers() if headers is None else headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
             ) as r:
+                if r.status == 401:
+                    self.auth_required.emit()
+                    return None
                 if r.status >= 400:
                     self.request_error.emit(f"Server error {r.status} on {path}")
                     return None
@@ -131,8 +170,12 @@ class ApiClient(QObject):
             return None
         try:
             async with self._session.get(
-                f"{self._base}{path}", params=params, timeout=aiohttp.ClientTimeout(total=10)
+                f"{self._base}{path}", params=params, headers=self._headers(),
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as r:
+                if r.status == 401:
+                    self.auth_required.emit()
+                    return None
                 if r.status >= 400:
                     self.request_error.emit(f"Server error {r.status} on {path}")
                     return None
@@ -146,6 +189,21 @@ class ApiClient(QObject):
             asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     # ── public API (called from UI thread) ────────────────────────────────
+
+    # auth
+    def auth_me(self) -> None:
+        """Validate the stored token; emits auth_ok(dict) or auth_required on 401."""
+        async def _do() -> None:
+            data = await self._get("/auth/me")
+            if isinstance(data, dict):
+                self.auth_ok.emit(data)
+        self._submit(_do())
+
+    def logout(self) -> None:
+        # снапшот заголовка на момент вызова: set_token(None) сразу после
+        # logout() не должен превратить запрос в неавторизованный
+        headers = self._headers()
+        self._submit(self._post("/auth/logout", {}, headers=headers))
 
     def fetch_guilds(self) -> None:
         async def _do() -> None:

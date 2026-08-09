@@ -28,6 +28,11 @@ class MainWindow(QMainWindow):
         self._guilds:   list[dict] = []
         self._state:    dict       = {}
 
+        # вход через Discord: main() задаёт коллбек, guard не даёт
+        # открыть несколько LoginDialog при серии 401/4401
+        self._login_handler = None
+        self._login_active  = False
+
         self.setWindowTitle("Medral")
         self.setMinimumSize(960, 620)
         self.resize(1140, 720)
@@ -127,6 +132,10 @@ class MainWindow(QMainWindow):
         self._dot.setToolTip("WebSocket disconnected")
         lay.addWidget(self._dot)
 
+        self._user_lbl = QLabel("")
+        self._user_lbl.setStyleSheet("color:#6b6b8a; background:transparent;")
+        lay.addWidget(self._user_lbl)
+
         change_btn = QPushButton("⚙")
         change_btn.setToolTip("Change server")
         change_btn.setFixedSize(32, 32)
@@ -149,6 +158,8 @@ class MainWindow(QMainWindow):
         self.client.ws_connected.connect(self._on_ws_up)
         self.client.ws_disconnected.connect(self._on_ws_down)
         self.client.request_error.connect(self._on_error)
+        self.client.auth_required.connect(self._on_auth_required)
+        self.client.auth_ok.connect(self._on_auth_ok)
 
         self.ch_panel.join_requested.connect(
             lambda g, c: self.client.join(g, c)
@@ -258,6 +269,55 @@ class MainWindow(QMainWindow):
         # a failed /search never emits search_results_ready — unfreeze the panel
         self.search_panel.reset_loading()
 
+    # ── auth ──────────────────────────────────────────────────────────────
+
+    def set_login_handler(self, fn) -> None:
+        """fn() -> bool: показывает LoginDialog, True = вход выполнен."""
+        self._login_handler = fn
+
+    def set_username(self, name: str) -> None:
+        self._user_lbl.setText(name or "")
+
+    def request_login(self) -> bool:
+        if self._login_active or self._login_handler is None:
+            return False
+        self._login_active = True
+        try:
+            return bool(self._login_handler())
+        finally:
+            self._login_active = False
+
+    @pyqtSlot()
+    def _on_auth_required(self) -> None:
+        self.request_login()
+
+    @pyqtSlot(dict)
+    def _on_auth_ok(self, data: dict) -> None:
+        self.set_username(data.get("username", ""))
+
+    def _do_logout(self) -> None:
+        import json
+        from pathlib import Path
+
+        self.client.logout()          # токен снапшотится внутри logout()
+
+        cfg_file = Path.home() / ".medral" / "config.json"
+        try:
+            cfg = json.loads(cfg_file.read_text())
+        except Exception:
+            cfg = {}
+        cfg.pop("token", None)
+        cfg.pop("username", None)
+        try:
+            cfg_file.parent.mkdir(parents=True, exist_ok=True)
+            cfg_file.write_text(json.dumps(cfg, indent=2))
+        except Exception:
+            pass
+
+        self.client.set_token(None)
+        self.set_username("")
+        self.request_login()
+
     # ── playback controls ─────────────────────────────────────────────────
 
     @pyqtSlot(str)
@@ -298,9 +358,11 @@ class MainWindow(QMainWindow):
         except Exception:
             cfg = {"host": DEFAULT_HOST, "port": DEFAULT_PORT}
 
+        LOGOUT = 2   # кастомный код результата диалога
+
         dlg = QDialog(self)
         dlg.setWindowTitle("Change server")
-        dlg.setFixedSize(340, 160)
+        dlg.setFixedSize(340, 210)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(10)
@@ -317,6 +379,11 @@ class MainWindow(QMainWindow):
         row2.addWidget(port_edit)
         lay.addLayout(row2)
 
+        logout_btn = _Btn("Выйти из аккаунта")
+        logout_btn.setObjectName("disconnectBtn")
+        logout_btn.clicked.connect(lambda: dlg.done(LOGOUT))
+        lay.addWidget(logout_btn)
+
         btns = QHBoxLayout()
         cancel = _Btn("Cancel")
         cancel.clicked.connect(dlg.reject)
@@ -327,7 +394,11 @@ class MainWindow(QMainWindow):
         btns.addWidget(ok)
         lay.addLayout(btns)
 
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        res = dlg.exec()
+        if res == LOGOUT:
+            self._do_logout()
+            return
+        if res != QDialog.DialogCode.Accepted:
             return
 
         host = host_edit.text().strip() or cfg["host"]

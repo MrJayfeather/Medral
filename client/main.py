@@ -2,9 +2,12 @@ import os
 import sys
 import json
 import socket
+import secrets
 import subprocess
 import tempfile
 import threading
+import time
+import webbrowser
 from pathlib import Path
 
 
@@ -246,6 +249,146 @@ class _UpdateChecker(QObject):
         UpdateDialog(current, latest, url).exec()
 
 
+# ── Discord login ─────────────────────────────────────────────────────────────
+
+class LoginDialog(QDialog):
+    """OAuth-вход через Discord: открывает браузер и поллит /auth/poll.
+
+    Поллинг — QTimer каждые 2 с + urllib в daemon-потоке (cf. _UpdateChecker),
+    UI не блокируется. Таймаут 180 с. «Отмена» = reject → выход из приложения.
+    """
+
+    _poll_done = pyqtSignal(dict)   # daemon thread → UI thread (queued)
+
+    def __init__(self, host: str, port: int, parent=None) -> None:
+        super().__init__(parent)
+        self._host     = host
+        self._port     = port
+        self._state    = ""
+        self._deadline = 0.0
+        self._polling  = False
+
+        self.result_token    = ""
+        self.result_user_id  = ""
+        self.result_username = ""
+
+        self.setWindowTitle("Medral — вход")
+        self.setFixedSize(420, 300)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._poll_tick)
+        self._poll_done.connect(self._on_poll_done)
+
+        self._build()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(36, 32, 36, 28)
+        root.setSpacing(0)
+
+        logo = QLabel("♪  MEDRAL")
+        logo.setObjectName("logo")
+        logo.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addWidget(logo)
+        root.addSpacing(16)
+
+        sub = QLabel("Войди через Discord, чтобы управлять ботом")
+        sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color:#7d8590; font-size:12px;")
+        root.addWidget(sub)
+        root.addSpacing(22)
+
+        self._login_btn = QPushButton("Войти через Discord")
+        self._login_btn.setObjectName("primaryBtn")
+        self._login_btn.setDefault(True)
+        self._login_btn.clicked.connect(self._start_login)
+        root.addWidget(self._login_btn)
+        root.addSpacing(10)
+
+        self._status = QLabel("")
+        self._status.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("color:#6b6b8a; font-size:11px;")
+        root.addWidget(self._status)
+        root.addStretch()
+
+        cancel = QPushButton("Отмена")
+        cancel.clicked.connect(self.reject)
+        root.addWidget(cancel)
+
+    # ── login flow ────────────────────────────────────────────────────────
+
+    def _start_login(self) -> None:
+        self._state    = secrets.token_urlsafe(24)
+        self._deadline = time.monotonic() + 180
+        self._login_btn.setEnabled(False)
+        self._status.setText("Открыл браузер — подтверди вход и вернись сюда…")
+        webbrowser.open(f"http://{self._host}:{self._port}/auth/login?state={self._state}")
+        self._timer.start()
+
+    def _fail(self, message: str) -> None:
+        self._status.setText(message)
+        self._login_btn.setEnabled(True)
+
+    def _poll_tick(self) -> None:
+        if time.monotonic() >= self._deadline:
+            self._timer.stop()
+            self._fail("Не дождался входа, попробуй ещё раз")
+            return
+        if self._polling:
+            return
+        self._polling = True
+        threading.Thread(
+            target=self._poll_once, args=(self._state,), daemon=True
+        ).start()
+
+    def _poll_once(self, state: str) -> None:
+        import urllib.request, urllib.error, json as _json
+        try:
+            with urllib.request.urlopen(
+                f"http://{self._host}:{self._port}/auth/poll?state={state}", timeout=5
+            ) as r:
+                data = _json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            # 404 = state неизвестен/протух (например, сервер перезапустился)
+            # — ждать дальше бессмысленно
+            data = {"status": "expired"} if e.code == 404 else {}
+        except Exception:
+            data = {}   # сеть — просто ждём следующий тик
+        self._poll_done.emit(data if isinstance(data, dict) else {})
+
+    def _on_poll_done(self, data: dict) -> None:
+        self._polling = False
+        if not self._timer.isActive():
+            return   # уже таймаут или отмена
+        if data.get("status") == "expired":
+            self._timer.stop()
+            self._fail("Сессия входа устарела — нажми кнопку ещё раз")
+            return
+        if data.get("status") == "ok" and data.get("token"):
+            self._timer.stop()
+            self.result_token    = data["token"]
+            self.result_user_id  = str(data.get("user_id", ""))
+            self.result_username = data.get("username", "")
+            self.accept()
+
+    def reject(self) -> None:
+        self._timer.stop()
+        super().reject()
+
+    # frameless drag (как у ConnectDialog)
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = ev.globalPosition().toPoint() - self.pos()
+
+    def mouseMoveEvent(self, ev) -> None:
+        if ev.buttons() == Qt.MouseButton.LeftButton and hasattr(self, "_drag_pos"):
+            self.move(ev.globalPosition().toPoint() - self._drag_pos)
+
+
 # ── connection dialog ─────────────────────────────────────────────────────────
 
 class ConnectDialog(QDialog):
@@ -402,14 +545,44 @@ def main() -> None:
     _load_fonts()
     app.setFont(QFont("DM Sans", 10))
 
-    cfg  = _load_config()
-    host = cfg.get("host", DEFAULT_HOST)
-    port = cfg.get("port", DEFAULT_PORT)
+    cfg   = _load_config()
+    host  = cfg.get("host", DEFAULT_HOST)
+    port  = cfg.get("port", DEFAULT_PORT)
+    token = cfg.get("token") or None
 
     client = ApiClient(host, port)
+    client.set_token(token)
     client.start()
 
     window = MainWindow(client)
+
+    def _show_login() -> bool:
+        """Модальный вход через Discord. Отмена = выход из приложения."""
+        c   = _load_config()   # host/port могли смениться через «Change server»
+        dlg = LoginDialog(
+            c.get("host", DEFAULT_HOST), c.get("port", DEFAULT_PORT),
+            parent=window if window.isVisible() else None,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            c["token"]    = dlg.result_token
+            c["username"] = dlg.result_username
+            _save_config(c)
+            client.set_token(dlg.result_token)
+            window.set_username(dlg.result_username)
+            client.fetch_guilds()
+            return True
+        QApplication.quit()
+        return False
+
+    window.set_login_handler(_show_login)
+
+    if token is None:
+        # входим ДО показа главного окна (request_login → guard от повторов)
+        if not window.request_login():
+            client.stop()
+            sys.exit(0)
+    else:
+        window.set_username(cfg.get("username", ""))
 
     splash = SplashScreen()
     splash.show()
@@ -417,6 +590,9 @@ def main() -> None:
     def _on_splash_done() -> None:
         window.show()
         QTimer.singleShot(800, client.fetch_guilds)
+        if token is not None:
+            # валидация сохранённого токена в фоне; при 401 → auth_required
+            QTimer.singleShot(1200, client.auth_me)
 
     splash.closed.connect(_on_splash_done)
 

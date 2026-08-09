@@ -1,8 +1,9 @@
 import os
 import asyncio
+import time
 import discord
 from dotenv import load_dotenv
-from typing import Optional, Dict, Callable, Awaitable
+from typing import Optional, Dict, Callable, Awaitable, Tuple
 
 from audio import MusicPlayer, search_tracks, load_playlist, is_playlist_url
 
@@ -31,6 +32,10 @@ MAX_RECONNECT_ATTEMPTS = 3
 # idle (empty queue, nothing playing) or alone (no humans in the channel)
 _auto_leave_tasks: Dict[int, asyncio.Task] = {}
 AUTO_LEAVE_DELAY = 300  # seconds
+
+# membership cache: (guild_id, user_id) -> (is_member, expires_at monotonic)
+_member_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
+MEMBER_CACHE_TTL = 300  # seconds
 
 # set by api.py so state updates are broadcast to WebSocket clients
 _broadcast: Optional[Callable[[int, dict], Awaitable[None]]] = None
@@ -666,3 +671,62 @@ async def api_move_in_queue(guild_id: int, from_index: int, to_index: int) -> di
 async def api_get_state(guild_id: int) -> Optional[dict]:
     p = _players.get(guild_id)
     return p.get_state() if p else None
+
+
+# ------------------------------------------------------------------ auth helpers used by api.py
+
+async def api_is_member(guild_id: int, user_id: int) -> bool:
+    """Whether the user is a member of the guild. Cached for MEMBER_CACHE_TTL."""
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return False
+
+    key = (guild_id, user_id)
+    now = time.monotonic()
+    cached = _member_cache.get(key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+
+    if guild.get_member(user_id) is not None:
+        _member_cache[key] = (True, now + MEMBER_CACHE_TTL)
+        return True
+
+    try:
+        await guild.fetch_member(user_id)
+        result = True
+    except discord.NotFound:
+        result = False
+    except discord.HTTPException as exc:
+        # Transient Discord error — deny access but don't poison the cache
+        print(f"[auth] fetch_member({user_id}) failed in {guild.name}: {exc}")
+        return False
+
+    _member_cache[key] = (result, now + MEMBER_CACHE_TTL)
+    return result
+
+
+def api_user_voice_channel_id(guild_id: int, user_id: int) -> Optional[int]:
+    """Voice channel the user is currently in, or None."""
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return None
+    member = guild.get_member(user_id)
+    if member is not None and member.voice and member.voice.channel:
+        return member.voice.channel.id
+    # Voice states are tracked per-guild even for members missing from the
+    # member cache. _voice_states is private but stable across py-cord releases.
+    voice_state = getattr(guild, "_voice_states", {}).get(user_id)
+    if voice_state is not None and voice_state.channel:
+        return voice_state.channel.id
+    return None
+
+
+def api_bot_voice_channel_id(guild_id: int) -> Optional[int]:
+    """Voice channel the bot is currently connected to, or None."""
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return None
+    vc = guild.voice_client  # authoritative Discord cache
+    if vc is not None and vc.is_connected() and vc.channel is not None:
+        return vc.channel.id
+    return None
