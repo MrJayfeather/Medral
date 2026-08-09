@@ -27,7 +27,7 @@ class SearchPanel(QWidget):
 
         self._input = QLineEdit()
         self._input.setPlaceholderText(
-            "Search YouTube — song name, artist, or paste a URL…"
+            "Search YouTube — song name, artist, or paste a track/playlist URL…"
         )
         self._input.returnPressed.connect(self._on_submit)
         bar.addWidget(self._input, 1)

@@ -30,6 +30,17 @@ def _rounded_pixmap(px: QPixmap, r: int = 12) -> QPixmap:
     return out
 
 
+_LOOP_ORDER = ["none", "all", "one"]        # click cycle: none → all → one → none
+_LOOP_ICONS = {"none": "🔁", "all": "🔁", "one": "🔂"}
+_LOOP_TIPS  = {"none": "Loop: off", "all": "Loop: queue", "one": "Loop: track"}
+_LOOP_ACTIVE_QSS = (
+    "QPushButton { color:#6C63FF; background-color:rgba(108,99,255,0.18);"
+    " border:none; border-radius:20px; font-size:18px; }"
+    "QPushButton:hover { background-color:rgba(108,99,255,0.30); }"
+    "QPushButton:pressed { background-color:rgba(108,99,255,0.40); }"
+)
+
+
 class _EqWidget(QWidget):
     """18-bar animated equalizer visualizer."""
 
@@ -93,6 +104,8 @@ class PlayerPanel(QFrame):
     previous_clicked   = pyqtSignal()
     volume_changed     = pyqtSignal(float)
     seek_requested     = pyqtSignal(float)
+    shuffle_clicked    = pyqtSignal()
+    loop_clicked       = pyqtSignal(str)     # next mode: "none" | "one" | "all"
 
     _ART_SIZE = 150
 
@@ -106,6 +119,7 @@ class PlayerPanel(QFrame):
         self._position     = 0.0
         self._seeking      = False
         self._thumb_url    = ""
+        self._loop_mode    = "none"
         self._seek_timer   = QTimer(self)
         self._seek_timer.setSingleShot(True)
         self._seek_timer.timeout.connect(self._do_seek)
@@ -198,6 +212,10 @@ class PlayerPanel(QFrame):
         ctrl.setSpacing(8)
         ctrl.addStretch()
 
+        self._shuffle_btn = _TransportButton("🔀", "Shuffle queue")
+        self._shuffle_btn.clicked.connect(self.shuffle_clicked)
+        ctrl.addWidget(self._shuffle_btn)
+
         self._prev_btn = _TransportButton("⏮", "Previous")
         self._prev_btn.clicked.connect(self.previous_clicked)
         ctrl.addWidget(self._prev_btn)
@@ -212,6 +230,10 @@ class PlayerPanel(QFrame):
         self._skip_btn = _TransportButton("⏭", "Skip")
         self._skip_btn.clicked.connect(self.skip_clicked)
         ctrl.addWidget(self._skip_btn)
+
+        self._loop_btn = _TransportButton(_LOOP_ICONS["none"], _LOOP_TIPS["none"])
+        self._loop_btn.clicked.connect(self._on_loop_click)
+        ctrl.addWidget(self._loop_btn)
 
         ctrl.addStretch()
 
@@ -233,6 +255,10 @@ class PlayerPanel(QFrame):
     # ── public ────────────────────────────────────────────────────────────
 
     def update_state(self, state: dict) -> None:
+        # loop mode persists on the server regardless of playback — sync it
+        # even when nothing is playing (no signals emitted, no feedback loop)
+        self._set_loop_mode(state.get("loop_mode", "none"))
+
         current = state.get("current")
 
         if not current:
@@ -305,6 +331,20 @@ class PlayerPanel(QFrame):
             f"stop:0 #16162a, stop:1 #0e0e1a);"
             f" border-radius:12px; font-size:40px; color:#6b6b8a;"
         )
+
+    def _set_loop_mode(self, mode: str) -> None:
+        if mode not in _LOOP_ICONS or mode == self._loop_mode:
+            return
+        self._loop_mode = mode
+        self._loop_btn.setText(_LOOP_ICONS[mode])
+        self._loop_btn.setToolTip(_LOOP_TIPS[mode])
+        # active modes glow purple; "none" falls back to the app stylesheet
+        self._loop_btn.setStyleSheet(_LOOP_ACTIVE_QSS if mode != "none" else "")
+
+    def _on_loop_click(self) -> None:
+        nxt = _LOOP_ORDER[(_LOOP_ORDER.index(self._loop_mode) + 1) % len(_LOOP_ORDER)]
+        self._set_loop_mode(nxt)     # optimistic; server state_update confirms
+        self.loop_clicked.emit(nxt)
 
     def _on_vol_changed(self, v: int) -> None:
         self._pending_vol = v / 100.0

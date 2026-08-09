@@ -145,6 +145,7 @@ def _empty_state(guild_id: int) -> dict:
         "is_playing": False,
         "is_paused": False,
         "volume": 0.5,
+        "loop_mode": "none",
         "voice_channel_id": None,
     }
 
@@ -193,6 +194,23 @@ class QueueRemoveBody(BaseModel):
     index: int
 
 
+class LoopBody(BaseModel):
+    guild_id: int
+    mode: str   # "none" | "one" | "all"
+
+    @field_validator("mode")
+    @classmethod
+    def _check_mode(cls, v: str) -> str:
+        if v not in ("none", "one", "all"):
+            raise ValueError("mode must be 'none', 'one' or 'all'")
+        return v
+
+
+class PlaylistBody(BaseModel):
+    guild_id: int
+    url: str
+
+
 # ------------------------------------------------------------------ info endpoints
 
 @app.get("/health")
@@ -234,7 +252,14 @@ async def leave(body: GuildBody):
 
 @app.post("/play")
 async def play(body: PlayBody):
+    """Play a track. Playlist URLs are detected and enqueued as a whole."""
     return _ok_or_raise(await music_bot.api_play(body.guild_id, body.query))
+
+
+@app.post("/playlist")
+async def play_playlist(body: PlaylistBody):
+    """Load a whole playlist by URL and enqueue all its tracks."""
+    return _ok_or_raise(await music_bot.api_play_playlist(body.guild_id, body.url))
 
 
 @app.post("/skip")
@@ -270,6 +295,16 @@ async def set_volume(body: VolumeBody):
 @app.post("/seek")
 async def seek(body: SeekBody):
     return await music_bot.api_seek(body.guild_id, body.position)
+
+
+@app.post("/shuffle")
+async def shuffle(body: GuildBody):
+    return _ok_or_raise(await music_bot.api_shuffle(body.guild_id))
+
+
+@app.post("/loop")
+async def set_loop(body: LoopBody):
+    return _ok_or_raise(await music_bot.api_set_loop(body.guild_id, body.mode))
 
 
 # ------------------------------------------------------------------ search

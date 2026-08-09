@@ -12,6 +12,13 @@ from ui.player_panel       import PlayerPanel
 from ui.queue_panel        import QueuePanel
 
 
+def _is_playlist_url(url: str) -> bool:
+    """Mirrors the server-side playlist detection in POST /play."""
+    return url.startswith("http") and (
+        "list=" in url or "/playlist" in url or "/album" in url
+    )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, client: ApiClient) -> None:
         super().__init__()
@@ -166,6 +173,12 @@ class MainWindow(QMainWindow):
         self.player_panel.seek_requested.connect(
             lambda pos: self._guild_id and self.client.seek(self._guild_id, pos)
         )
+        self.player_panel.shuffle_clicked.connect(
+            lambda: self._guild_id and self.client.shuffle(self._guild_id)
+        )
+        self.player_panel.loop_clicked.connect(
+            lambda mode: self._guild_id and self.client.set_loop(self._guild_id, mode)
+        )
 
         self.queue_panel.remove_requested.connect(
             lambda i: self._guild_id and self.client.remove_from_queue(self._guild_id, i)
@@ -254,7 +267,12 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_play_url(self, url: str) -> None:
-        if self._guild_id:
+        if not self._guild_id:
+            return
+        if _is_playlist_url(url):
+            self.client.play_playlist(self._guild_id, url)
+            self.statusBar().showMessage("Загружаю плейлист…", 8000)
+        else:
             self.client.play(self._guild_id, url)
 
     @pyqtSlot()

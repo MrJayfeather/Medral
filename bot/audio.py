@@ -1,4 +1,5 @@
 import asyncio
+import random
 import time
 import yt_dlp
 import discord
@@ -23,6 +24,14 @@ YTDL_SEARCH_OPTS = {
     "no_warnings": True,
     "source_address": "0.0.0.0",
     "extract_flat": True,
+}
+
+# Playlist opts — flat like search, but playlist expansion is allowed
+YTDL_PLAYLIST_OPTS = {
+    "quiet": True,
+    "no_warnings": True,
+    "source_address": "0.0.0.0",
+    "extract_flat": "in_playlist",   # metadata only, no per-video stream URLs
 }
 
 FFMPEG_OPTIONS = {
@@ -73,6 +82,14 @@ def _entry_to_track(entry: dict) -> Track:
     )
 
 
+def is_playlist_url(query: str) -> bool:
+    """True for URLs that reference a whole playlist rather than a single track."""
+    return (
+        query.startswith("http")
+        and ("list=" in query or "/playlist" in query or "/album" in query)
+    )
+
+
 async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
     if query.startswith("http://") or query.startswith("https://"):
         search_query = query
@@ -102,9 +119,50 @@ async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
     return tracks[:max_results]
 
 
+async def load_playlist(url: str, max_tracks: int = 100) -> List[Track]:
+    """Extract all tracks from a playlist URL (flat — no stream URLs yet)."""
+    try:
+        data = await _yt_extract(YTDL_PLAYLIST_OPTS, url)
+    except Exception as exc:
+        print(f"[playlist] yt-dlp error for {url!r}: {exc}")
+        return []
+
+    if not data:
+        return []
+
+    entries = data.get("entries") or []
+    tracks: List[Track] = []
+    for e in entries:
+        if not e:
+            continue
+        try:
+            t = _entry_to_track(e)
+        except Exception as exc:
+            print(f"[playlist] entry parse error: {exc}")
+            continue
+        if not t.webpage_url:
+            continue
+        if not t.thumbnail:
+            # Flat entries carry a "thumbnails" list instead of "thumbnail"
+            thumbs = e.get("thumbnails") or []
+            if thumbs:
+                t.thumbnail = thumbs[-1].get("url", "")
+        tracks.append(t)
+        if len(tracks) >= max_tracks:
+            break
+    return tracks
+
+
 async def get_stream_url(track: Track) -> str:
     data = await _yt_extract(YTDL_OPTS, track.webpage_url)
     return data.get("url", "")
+
+
+# Loop modes
+LOOP_NONE = "none"
+LOOP_ONE = "one"
+LOOP_ALL = "all"
+LOOP_MODES = (LOOP_NONE, LOOP_ONE, LOOP_ALL)
 
 
 class MusicPlayer:
@@ -125,6 +183,7 @@ class MusicPlayer:
         self._paused: bool = False
         self._intentional_stop: bool = False
         self._seeking: bool = False
+        self.loop_mode: str = LOOP_NONE
 
         # progress tracking
         self._play_started_at: float = 0.0
@@ -163,16 +222,34 @@ class MusicPlayer:
         self.queue.append(track)
         await self._on_state_change(self.guild_id)
 
+    async def enqueue_many(self, tracks: List[Track]) -> None:
+        self.queue.extend(tracks)
+        await self._on_state_change(self.guild_id)
+
     async def play_next(self) -> None:
-        if not self.queue or not self.voice_client or not self.voice_client.is_connected():
+        if not self.voice_client or not self.voice_client.is_connected():
             if self.current:
                 self.history.append(self.current)
                 self.current = None
             await self._on_state_change(self.guild_id)
             return
 
+        # Route the finished track according to loop mode. current may already
+        # be None here (previous() clears it before stopping the source).
         if self.current:
-            self.history.append(self.current)
+            if self.loop_mode == LOOP_ONE:
+                # Replay the same track — back to the front, not into history
+                self.queue.appendleft(self.current)
+            elif self.loop_mode == LOOP_ALL:
+                # Cycle the finished track to the end of the queue
+                self.queue.append(self.current)
+            else:
+                self.history.append(self.current)
+            self.current = None
+
+        if not self.queue:
+            await self._on_state_change(self.guild_id)
+            return
 
         self.current = self.queue.popleft()
         self._paused = False
@@ -185,9 +262,14 @@ class MusicPlayer:
             raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
             source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
         except Exception as exc:
-            # Track unavailable (deleted, age-restricted, ...) — skip to the next
-            # one. Recursion is safe: the queue is finite and shrinks each call.
+            # Track unavailable (deleted, age-restricted, ...) — drop it into
+            # history and skip to the next one. Dropping (instead of letting
+            # the loop logic re-queue it) keeps a dead track from cycling
+            # forever under loop one/all. Recursion is safe: the queue is
+            # finite and shrinks each call.
             print(f"[audio] cannot play {self.current.title}: {exc}")
+            self.history.append(self.current)
+            self.current = None
             await self.play_next()
             return
 
@@ -262,6 +344,10 @@ class MusicPlayer:
         if self.voice_client and (
             self.voice_client.is_playing() or self.voice_client.is_paused()
         ):
+            if self.loop_mode == LOOP_ONE and self.current:
+                # Manual skip should advance even in repeat-one mode
+                self.history.append(self.current)
+                self.current = None
             self.voice_client.stop()  # triggers _after -> play_next
 
     async def previous(self) -> None:
@@ -280,6 +366,17 @@ class MusicPlayer:
             self.voice_client.stop()
         else:
             await self.play_next()
+
+    async def shuffle(self) -> None:
+        q = list(self.queue)
+        random.shuffle(q)
+        self.queue = deque(q)
+        await self._on_state_change(self.guild_id)
+
+    def set_loop(self, mode: str) -> None:
+        if mode not in LOOP_MODES:
+            raise ValueError(f"unknown loop mode: {mode!r}")
+        self.loop_mode = mode
 
     def set_volume(self, volume: float) -> None:
         self._volume = max(0.0, min(1.0, volume))
@@ -339,6 +436,7 @@ class MusicPlayer:
             "is_playing": self.is_playing,
             "is_paused": self.is_paused,
             "volume": self._volume,
+            "loop_mode": self.loop_mode,
             "voice_channel_id": (
                 str(self.voice_client.channel.id)
                 if self.voice_client and self.voice_client.channel

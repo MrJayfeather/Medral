@@ -111,12 +111,12 @@ class ApiClient(QObject):
 
     # ── internal HTTP helpers ─────────────────────────────────────────────
 
-    async def _post(self, path: str, body: dict) -> Optional[dict]:
+    async def _post(self, path: str, body: dict, timeout: float = 10) -> Optional[dict]:
         if self._session is None:
             return None
         try:
             async with self._session.post(
-                f"{self._base}{path}", json=body, timeout=aiohttp.ClientTimeout(total=10)
+                f"{self._base}{path}", json=body, timeout=aiohttp.ClientTimeout(total=timeout)
             ) as r:
                 if r.status >= 400:
                     self.request_error.emit(f"Server error {r.status} on {path}")
@@ -201,7 +201,18 @@ class ApiClient(QObject):
     def seek(self, guild_id: int, position: float) -> None:
         self._submit(self._post("/seek", {"guild_id": guild_id, "position": position}))
 
+    def play_playlist(self, guild_id: int, url: str) -> None:
+        # Flat-extracting a 100-track playlist can exceed the default timeout
+        self._submit(self._post("/playlist", {"guild_id": guild_id, "url": url}, timeout=30))
+
+    def set_loop(self, guild_id: int, mode: str) -> None:
+        """mode: "none" | "one" | "all"."""
+        self._submit(self._post("/loop", {"guild_id": guild_id, "mode": mode}))
+
     # queue
+    def shuffle(self, guild_id: int) -> None:
+        self._submit(self._post("/shuffle", {"guild_id": guild_id}))
+
     def remove_from_queue(self, guild_id: int, index: int) -> None:
         self._submit(self._post("/queue/remove", {"guild_id": guild_id, "index": index}))
 

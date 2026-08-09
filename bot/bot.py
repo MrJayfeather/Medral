@@ -4,7 +4,7 @@ import discord
 from dotenv import load_dotenv
 from typing import Optional, Dict, Callable, Awaitable
 
-from audio import MusicPlayer, search_tracks
+from audio import MusicPlayer, search_tracks, load_playlist, is_playlist_url
 
 load_dotenv()
 
@@ -26,6 +26,11 @@ _reconnect_locks: Dict[int, asyncio.Lock] = {}
 # per-guild reconnect attempt counter
 _reconnect_attempts: Dict[int, int] = {}
 MAX_RECONNECT_ATTEMPTS = 3
+
+# per-guild auto-leave timers: disconnect after AUTO_LEAVE_DELAY seconds when
+# idle (empty queue, nothing playing) or alone (no humans in the channel)
+_auto_leave_tasks: Dict[int, asyncio.Task] = {}
+AUTO_LEAVE_DELAY = 300  # seconds
 
 # set by api.py so state updates are broadcast to WebSocket clients
 _broadcast: Optional[Callable[[int, dict], Awaitable[None]]] = None
@@ -56,6 +61,8 @@ def get_guilds() -> list[dict]:
 
 
 async def _notify(guild_id: int) -> None:
+    # Every state change re-evaluates the auto-leave timer
+    _check_auto_leave(guild_id)
     if _broadcast and guild_id in _players:
         await _broadcast(guild_id, _players[guild_id].get_state())
 
@@ -64,6 +71,70 @@ def _player(guild_id: int) -> MusicPlayer:
     if guild_id not in _players:
         _players[guild_id] = MusicPlayer(guild_id, _notify)
     return _players[guild_id]
+
+
+# ------------------------------------------------------------------ auto-leave
+
+def _is_idle(p: MusicPlayer) -> bool:
+    """Nothing queued, nothing playing, nothing paused."""
+    return not p.queue and not p.is_playing and not p.is_paused
+
+
+def _is_alone(p: MusicPlayer) -> bool:
+    """No human members left in the bot's voice channel."""
+    channel = p.voice_client.channel if p.voice_client else None
+    if channel is None:
+        return False
+    return not any(not m.bot for m in channel.members)
+
+
+async def _auto_leave(guild_id: int) -> None:
+    """Disconnect after AUTO_LEAVE_DELAY seconds if still idle or alone."""
+    try:
+        await asyncio.sleep(AUTO_LEAVE_DELAY)
+    except asyncio.CancelledError:
+        return
+
+    _auto_leave_tasks.pop(guild_id, None)
+    p = _players.get(guild_id)
+    guild = bot.get_guild(guild_id)
+    if not p or not guild or not p.voice_client or not p.voice_client.is_connected():
+        return
+
+    # Re-check right before leaving — activity may have resumed meanwhile
+    idle, alone = _is_idle(p), _is_alone(p)
+    if not idle and not alone:
+        return
+
+    reason = "idle" if idle else "empty channel"
+    print(f"[voice] auto-leave ({reason}) after {AUTO_LEAVE_DELAY}s in {guild.name}")
+    # stop_and_disconnect sets _intentional_stop, so on_voice_state_update
+    # won't treat this as an unexpected drop and trigger auto-reconnect.
+    await p.stop_and_disconnect()
+
+
+def _cancel_auto_leave(guild_id: int) -> None:
+    task = _auto_leave_tasks.pop(guild_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def _check_auto_leave(guild_id: int) -> None:
+    """Arm or cancel the auto-leave timer based on current activity.
+
+    Keeps an already-armed timer running (no countdown restarts) while the
+    idle/alone condition holds; cancels it as soon as activity resumes.
+    """
+    p = _players.get(guild_id)
+    if not p or not p.voice_client or not p.voice_client.is_connected():
+        _cancel_auto_leave(guild_id)
+        return
+    if _is_idle(p) or _is_alone(p):
+        existing = _auto_leave_tasks.get(guild_id)
+        if existing is None or existing.done():
+            _auto_leave_tasks[guild_id] = asyncio.create_task(_auto_leave(guild_id))
+    else:
+        _cancel_auto_leave(guild_id)
 
 
 # ------------------------------------------------------------------ events
@@ -161,6 +232,9 @@ async def on_voice_state_update(
     after: discord.VoiceState,
 ) -> None:
     if member != bot.user:
+        # Humans joining/leaving affect the alone-in-channel condition
+        if member.guild.id in _players:
+            _check_auto_leave(member.guild.id)
         return
     p = _players.get(member.guild.id)
     if not p:
@@ -178,6 +252,7 @@ async def on_voice_state_update(
         intentional = p._intentional_stop
         p._intentional_stop = False
         p.voice_client = None
+        _cancel_auto_leave(member.guild.id)
 
         if intentional:
             # /leave or stop command — clear everything
@@ -271,6 +346,54 @@ async def cmd_search(ctx: discord.ApplicationContext, query: str) -> None:
     await ctx.followup.send("\n".join(lines))
 
 
+@bot.slash_command(name="playlist", description="Загрузить плейлист по ссылке")
+async def cmd_playlist(ctx: discord.ApplicationContext, url: str) -> None:
+    await ctx.defer()
+    p = _player(ctx.guild_id)
+
+    if not ctx.voice_client:
+        if ctx.author.voice:
+            p.voice_client = await ctx.author.voice.channel.connect()
+        else:
+            await ctx.followup.send("Вы не в голосовом канале!")
+            return
+    elif p.voice_client is None:
+        p.voice_client = ctx.voice_client
+
+    tracks = await load_playlist(url)
+    if not tracks:
+        await ctx.followup.send("Плейлист пуст или недоступен.")
+        return
+
+    await p.enqueue_many(tracks)
+    await ctx.followup.send(f"Добавлено треков из плейлиста: {len(tracks)}")
+
+    if not p.is_playing and not p.is_paused:
+        await p.play_next()
+
+
+@bot.slash_command(name="shuffle", description="Перемешать очередь")
+async def cmd_shuffle(ctx: discord.ApplicationContext) -> None:
+    p = _player(ctx.guild_id)
+    if not p.queue:
+        await ctx.respond("Очередь пуста.", ephemeral=True)
+        return
+    await p.shuffle()
+    await ctx.respond("🔀 Очередь перемешана")
+
+
+@bot.slash_command(name="loop", description="Режим повтора: none / one / all")
+async def cmd_loop(
+    ctx: discord.ApplicationContext,
+    mode: discord.Option(str, "Режим повтора", choices=["none", "one", "all"]),  # type: ignore[valid-type]
+) -> None:
+    p = _player(ctx.guild_id)
+    p.set_loop(mode)
+    await _notify(ctx.guild_id)
+    labels = {"none": "Повтор выключен", "one": "🔂 Повтор трека", "all": "🔁 Повтор очереди"}
+    await ctx.respond(labels[mode])
+
+
 @bot.slash_command(name="skip", description="Пропустить текущий трек")
 async def cmd_skip(ctx: discord.ApplicationContext) -> None:
     p = _player(ctx.guild_id)
@@ -315,6 +438,11 @@ async def cmd_stop(ctx: discord.ApplicationContext) -> None:
     p = _player(ctx.guild_id)
     p.queue.clear()
     if p.is_playing or p.is_paused:
+        # Park the track in history before stopping — otherwise loop one/all
+        # would re-queue it inside play_next and playback would restart.
+        if p.current:
+            p.history.append(p.current)
+            p.current = None
         p.skip()
     await ctx.respond("⏹ Остановлено, очередь очищена")
     await _notify(ctx.guild_id)
@@ -406,6 +534,9 @@ async def api_leave(guild_id: int) -> dict:
 
 
 async def api_play(guild_id: int, query: str) -> dict:
+    # Whole-playlist URLs go through the playlist loader
+    if is_playlist_url(query):
+        return await api_play_playlist(guild_id, query)
     p = _player(guild_id)
     if not p.voice_client or not p.voice_client.is_connected():
         return {"ok": False, "error": "bot not in a voice channel"}
@@ -417,6 +548,19 @@ async def api_play(guild_id: int, query: str) -> dict:
     if not p.is_playing and not p.is_paused:
         await p.play_next()
     return {"ok": True, "track": track.to_dict()}
+
+
+async def api_play_playlist(guild_id: int, url: str) -> dict:
+    p = _player(guild_id)
+    if not p.voice_client or not p.voice_client.is_connected():
+        return {"ok": False, "error": "bot not in a voice channel"}
+    tracks = await load_playlist(url)
+    if not tracks:
+        return {"ok": False, "error": "playlist empty or unavailable"}
+    await p.enqueue_many(tracks)
+    if not p.is_playing and not p.is_paused:
+        await p.play_next()
+    return {"ok": True, "count": len(tracks)}
 
 
 async def api_search(query: str, max_results: int = 5) -> list[dict]:
@@ -454,11 +598,34 @@ async def api_stop(guild_id: int) -> dict:
     p = _player(guild_id)
     p.queue.clear()
     if p.is_playing or p.is_paused:
+        # Park the track in history before stopping — otherwise loop one/all
+        # would re-queue it inside play_next and playback would restart.
+        if p.current:
+            p.history.append(p.current)
+            p.current = None
         p.skip()
     # skip() notifies via play_next only when something was playing —
     # notify here so the cleared queue is broadcast in every branch.
     await _notify(guild_id)
     return {"ok": True}
+
+
+async def api_shuffle(guild_id: int) -> dict:
+    p = _player(guild_id)
+    if not p.queue:
+        return {"ok": False, "error": "queue is empty"}
+    await p.shuffle()
+    return {"ok": True}
+
+
+async def api_set_loop(guild_id: int, mode: str) -> dict:
+    p = _player(guild_id)
+    try:
+        p.set_loop(mode)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    await _notify(guild_id)
+    return {"ok": True, "loop_mode": mode}
 
 
 async def api_set_volume(guild_id: int, volume: float) -> dict:
