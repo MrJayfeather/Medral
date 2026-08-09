@@ -78,6 +78,10 @@ class SearchPanel(QWidget):
     def set_loading(self) -> None:
         self._set_loading(True)
 
+    def reset_loading(self) -> None:
+        """Re-enable input after a failed request (no results will arrive)."""
+        self._set_loading(False)
+
     def _set_loading(self, loading: bool) -> None:
         self._btn.setText("…" if loading else "Search")
         self._btn.setEnabled(not loading)

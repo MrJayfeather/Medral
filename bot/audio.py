@@ -52,7 +52,7 @@ class Track:
 
 
 async def _yt_extract(opts: dict, query: str) -> dict:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     with yt_dlp.YoutubeDL(opts) as ydl:
         return await loop.run_in_executor(
             None, lambda: ydl.extract_info(query, download=False)
@@ -178,11 +178,18 @@ class MusicPlayer:
         self._paused = False
         self._total_paused = 0.0
 
-        stream_url = await get_stream_url(self.current)
-        self._current_stream_url = stream_url
+        try:
+            stream_url = await get_stream_url(self.current)
+            self._current_stream_url = stream_url
 
-        raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-        source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
+            raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+            source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
+        except Exception as exc:
+            # Track unavailable (deleted, age-restricted, ...) — skip to the next
+            # one. Recursion is safe: the queue is finite and shrinks each call.
+            print(f"[audio] cannot play {self.current.title}: {exc}")
+            await self.play_next()
+            return
 
         self._play_started_at = time.time()
         loop = asyncio.get_running_loop()
@@ -207,6 +214,7 @@ class MusicPlayer:
     def resume(self) -> None:
         if self.voice_client and self.voice_client.is_paused():
             self.voice_client.resume()
+            self._paused = False
             self._total_paused += time.time() - self._pause_started_at
 
     async def seek(self, position: float) -> None:
@@ -215,6 +223,8 @@ class MusicPlayer:
         if not self._current_stream_url:
             return
         position = max(0.0, position)
+        if self.current.duration > 0:
+            position = min(position, self.current.duration - 1)
 
         self._seeking = True
         if self.voice_client.is_playing() or self.voice_client.is_paused():
@@ -233,7 +243,6 @@ class MusicPlayer:
         self._play_started_at = time.time() - position
         self._total_paused = 0.0
         self._paused = False
-        self._seeking = False
 
         loop = asyncio.get_running_loop()
 
@@ -244,6 +253,9 @@ class MusicPlayer:
                 loop.create_task(self.play_next())
 
         self.voice_client.play(source, after=_after)
+        # Reset only after play() — a slow-dying old FFmpeg fires its _after
+        # late, and with the flag still set it won't spawn a stray play_next.
+        self._seeking = False
         await self._on_state_change(self.guild_id)
 
     def skip(self) -> None:
@@ -258,6 +270,9 @@ class MusicPlayer:
         prev = self.history.pop()
         if self.current:
             self.queue.appendleft(self.current)
+            # Already back in the queue — clear it so play_next doesn't
+            # append it to history a second time.
+            self.current = None
         self.queue.appendleft(prev)
         if self.voice_client and (
             self.voice_client.is_playing() or self.voice_client.is_paused()
@@ -298,9 +313,13 @@ class MusicPlayer:
     # ------------------------------------------------------------------ lifecycle
 
     async def stop_and_disconnect(self) -> None:
-        self._intentional_stop = True
         self.queue.clear()
         if self.voice_client:
+            # Set the flag only when a real disconnect will follow — the flag
+            # is consumed by on_voice_state_update, and without a disconnect
+            # it would linger and mask the next unexpected drop as intentional.
+            if self.voice_client.is_connected():
+                self._intentional_stop = True
             if self.voice_client.is_playing() or self.voice_client.is_paused():
                 self.voice_client.stop()
             await self.voice_client.disconnect()

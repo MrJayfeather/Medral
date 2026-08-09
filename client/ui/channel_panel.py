@@ -19,6 +19,7 @@ class ChannelPanel(QFrame):
         self._guild_id:        int | None = None
         self._channels:        list[dict] = []
         self._connected_ch_id: int | None = None
+        self._rendered:        tuple | None = None  # what _rebuild_list last drew
 
         self._build_ui()
 
@@ -85,12 +86,23 @@ class ChannelPanel(QFrame):
     def update_state(self, state: dict) -> None:
         raw = state.get("voice_channel_id")
         self._connected_ch_id = int(raw) if raw else None
-        self._rebuild_list()
+        # keepalive pushes state_update every 10 s — don't wipe the list
+        # (and the user's selection) unless something actually changed
+        if self._snapshot() != self._rendered:
+            self._rebuild_list()
         self._refresh_btn()
 
     # ── private ───────────────────────────────────────────────────────────
 
+    def _snapshot(self) -> tuple:
+        return (
+            tuple((str(ch["id"]), ch["name"]) for ch in self._channels),
+            self._connected_ch_id,
+        )
+
     def _rebuild_list(self) -> None:
+        current = self._list.currentItem()
+        selected_id = current.data(Qt.ItemDataRole.UserRole) if current else None
         self._list.clear()
         for ch in self._channels:
             active = (self._connected_ch_id is not None
@@ -102,6 +114,9 @@ class ChannelPanel(QFrame):
                 item.setForeground(QColor("#6C63FF"))
                 item.setFont(_bold_font())
             self._list.addItem(item)
+            if selected_id is not None and str(ch["id"]) == selected_id:
+                self._list.setCurrentItem(item)
+        self._rendered = self._snapshot()
 
     def _refresh_btn(self) -> None:
         if self._connected_ch_id is not None:

@@ -110,6 +110,12 @@ class PlayerPanel(QFrame):
         self._seek_timer.setSingleShot(True)
         self._seek_timer.timeout.connect(self._do_seek)
 
+        self._pending_vol: float | None = None
+        self._vol_timer = QTimer(self)
+        self._vol_timer.setSingleShot(True)
+        self._vol_timer.setInterval(250)
+        self._vol_timer.timeout.connect(self._emit_volume)
+
         self._nam = QNetworkAccessManager(self)
         self._nam.finished.connect(self._on_image_loaded)
 
@@ -218,7 +224,8 @@ class PlayerPanel(QFrame):
         self._vol.setValue(50)
         self._vol.setFixedWidth(96)
         self._vol.setToolTip("Volume")
-        self._vol.valueChanged.connect(lambda v: self.volume_changed.emit(v / 100.0))
+        self._vol.valueChanged.connect(self._on_vol_changed)
+        self._vol.sliderReleased.connect(self._on_vol_released)
         ctrl.addWidget(self._vol)
 
         root.addLayout(ctrl)
@@ -245,6 +252,10 @@ class PlayerPanel(QFrame):
         if thumb and thumb != self._thumb_url:
             self._thumb_url = thumb
             self._nam.get(QNetworkRequest(QUrl(thumb)))
+        elif not thumb and self._thumb_url:
+            # new track has no cover — don't keep showing the previous one
+            self._thumb_url = ""
+            self._set_placeholder_art()
 
         self._is_playing = state.get("is_playing", False)
         self._is_paused  = state.get("is_paused",  False)
@@ -282,6 +293,11 @@ class PlayerPanel(QFrame):
         self._elapsed.setText("0:00")
         self._progress.setValue(0)
         self._play_btn.setText("▶")
+        self._set_placeholder_art()
+        self._eq.set_active(False)
+        self._tick_timer.stop()
+
+    def _set_placeholder_art(self) -> None:
         self._art.clear()
         self._art.setText("♪")
         self._art.setStyleSheet(
@@ -289,8 +305,20 @@ class PlayerPanel(QFrame):
             f"stop:0 #16162a, stop:1 #0e0e1a);"
             f" border-radius:12px; font-size:40px; color:#6b6b8a;"
         )
-        self._eq.set_active(False)
-        self._tick_timer.stop()
+
+    def _on_vol_changed(self, v: int) -> None:
+        self._pending_vol = v / 100.0
+        self._vol_timer.start()          # debounce: one POST /volume per ~250 ms
+
+    def _on_vol_released(self) -> None:
+        if self._vol_timer.isActive():
+            self._vol_timer.stop()
+            self._emit_volume()
+
+    def _emit_volume(self) -> None:
+        if self._pending_vol is not None:
+            self.volume_changed.emit(self._pending_vol)
+            self._pending_vol = None
 
     def _tick(self) -> None:
         if not self._is_playing or self._seeking or self._duration <= 0:
@@ -317,8 +345,9 @@ class PlayerPanel(QFrame):
         self._seeking = False
 
     def _on_image_loaded(self, reply: QNetworkReply) -> None:
-        if reply.error() != QNetworkReply.NetworkError.NoError:
-            reply.deleteLater()
+        if (reply.error() != QNetworkReply.NetworkError.NoError
+                or reply.request().url().toString() != self._thumb_url):
+            reply.deleteLater()          # failed or stale (track already changed)
             return
         data = reply.readAll()
         px = QPixmap()

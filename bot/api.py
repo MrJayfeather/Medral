@@ -2,11 +2,13 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
 import bot as music_bot
@@ -16,6 +18,9 @@ load_dotenv()
 TOKEN: Optional[str] = os.getenv("DISCORD_TOKEN")
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CLIENT_EXE = REPO_ROOT / "dist" / "MedralPlayer.exe"
 
 
 # ------------------------------------------------------------------ WebSocket manager
@@ -36,7 +41,9 @@ class ConnectionManager:
             return
         payload = json.dumps(data, ensure_ascii=False)
         dead: set[WebSocket] = set()
-        for ws in self._connections:
+        # Iterate over a copy — connect/disconnect may mutate the set while
+        # we await inside the loop.
+        for ws in list(self._connections):
             try:
                 await ws.send_text(payload)
             except Exception:
@@ -272,7 +279,8 @@ async def search(q: str, max_results: int = 5):
     """Search YouTube for tracks. Returns list of track objects."""
     if not q.strip():
         raise HTTPException(status_code=422, detail="query 'q' must not be empty")
-    results = await music_bot.api_search(q, max_results=min(max_results, 10))
+    max_results = max(1, min(max_results, 10))
+    results = await music_bot.api_search(q, max_results=max_results)
     return results
 
 
@@ -294,6 +302,24 @@ async def move_in_queue(body: QueueMoveBody):
 @app.post("/queue/remove")
 async def remove_from_queue(body: QueueRemoveBody):
     return await music_bot.api_remove_from_queue(body.guild_id, body.index)
+
+
+# ------------------------------------------------------------------ client auto-update
+
+@app.get("/version")
+async def get_version():
+    """Latest client version and whether a client build is available."""
+    version_file = REPO_ROOT / "version.txt"
+    version = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else ""
+    return {"client": version, "client_available": CLIENT_EXE.exists()}
+
+
+@app.get("/update/client")
+async def download_client():
+    """Download the latest client executable."""
+    if not CLIENT_EXE.exists():
+        raise HTTPException(status_code=404, detail="client build not available")
+    return FileResponse(CLIENT_EXE, filename="MedralPlayer.exe")
 
 
 # ------------------------------------------------------------------ WebSocket

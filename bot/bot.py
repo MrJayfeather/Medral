@@ -317,6 +317,7 @@ async def cmd_stop(ctx: discord.ApplicationContext) -> None:
     if p.is_playing or p.is_paused:
         p.skip()
     await ctx.respond("⏹ Остановлено, очередь очищена")
+    await _notify(ctx.guild_id)
 
 
 @bot.slash_command(name="leave", description="Отключить бота")
@@ -454,6 +455,9 @@ async def api_stop(guild_id: int) -> dict:
     p.queue.clear()
     if p.is_playing or p.is_paused:
         p.skip()
+    # skip() notifies via play_next only when something was playing —
+    # notify here so the cleared queue is broadcast in every branch.
+    await _notify(guild_id)
     return {"ok": True}
 
 

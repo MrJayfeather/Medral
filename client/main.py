@@ -209,18 +209,41 @@ def _ver_tuple(v: str):
         return (0,)
 
 
-def _check_update(host: str, port: int, current_version: str) -> None:
-    import urllib.request, json as _json
-    try:
-        with urllib.request.urlopen(f"http://{host}:{port}/version", timeout=5) as r:
-            data = _json.loads(r.read())
-        latest    = data.get("client", "0.0.0")
-        available = data.get("client_available", False)
-        if available and _ver_tuple(latest) > _ver_tuple(current_version):
-            UpdateDialog._pending = (current_version, latest,
-                                     f"http://{host}:{port}/update/client")
-    except Exception:
-        pass
+class _UpdateChecker(QObject):
+    """Runs the blocking /version request off the UI thread (cf. _Downloader)."""
+
+    update_available = pyqtSignal(str, str, str)   # current, latest, url
+
+    def __init__(self, host: str, port: int, current_version: str) -> None:
+        super().__init__()
+        self._host    = host
+        self._port    = port
+        self._current = current_version
+        # queued connection → the dialog is created in the UI thread
+        self.update_available.connect(self._show_dialog)
+
+    def check_in_background(self) -> None:
+        threading.Thread(target=self._check, daemon=True).start()
+
+    def _check(self) -> None:
+        import urllib.request, json as _json
+        try:
+            with urllib.request.urlopen(
+                f"http://{self._host}:{self._port}/version", timeout=5
+            ) as r:
+                data = _json.loads(r.read())
+            latest    = data.get("client", "0.0.0")
+            available = data.get("client_available", False)
+            if available and _ver_tuple(latest) > _ver_tuple(self._current):
+                self.update_available.emit(
+                    self._current, latest,
+                    f"http://{self._host}:{self._port}/update/client",
+                )
+        except Exception:
+            pass
+
+    def _show_dialog(self, current: str, latest: str, url: str) -> None:
+        UpdateDialog(current, latest, url).exec()
 
 
 # ── connection dialog ─────────────────────────────────────────────────────────
@@ -373,14 +396,8 @@ def main() -> None:
 
     splash.closed.connect(_on_splash_done)
 
-    def _do_update_check():
-        _check_update(host, port, CLIENT_VERSION)
-        pending = getattr(UpdateDialog, "_pending", None)
-        if pending:
-            del UpdateDialog._pending
-            UpdateDialog(*pending).exec()
-
-    QTimer.singleShot(3500, _do_update_check)
+    checker = _UpdateChecker(host, port, CLIENT_VERSION)   # keep a reference alive
+    QTimer.singleShot(3500, checker.check_in_background)
 
     ret = app.exec()
     client.stop()

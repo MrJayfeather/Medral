@@ -242,6 +242,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_error(self, msg: str) -> None:
         self.statusBar().showMessage(f"Error: {msg}", 6000)
+        # a failed /search never emits search_results_ready — unfreeze the panel
+        self.search_panel.reset_loading()
 
     # ── playback controls ─────────────────────────────────────────────────
 

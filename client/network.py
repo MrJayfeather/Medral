@@ -25,6 +25,9 @@ class ApiClient(QObject):
         self._session: Optional[aiohttp.ClientSession]     = None
         self._running  = False
         self._thread:  Optional[threading.Thread]          = None
+        # bumped on every stop(): a listener that outlived join(timeout=3)
+        # sees the mismatch and exits instead of racing the new thread
+        self._generation = 0
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -35,6 +38,7 @@ class ApiClient(QObject):
 
     def stop(self) -> None:
         self._running = False
+        self._generation += 1
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
 
@@ -50,30 +54,46 @@ class ApiClient(QObject):
     # ── background event loop ─────────────────────────────────────────────
 
     def _run(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._async_main())
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
 
-    async def _async_main(self) -> None:
-        self._session = aiohttp.ClientSession()
+        async def _make_session() -> aiohttp.ClientSession:
+            return aiohttp.ClientSession()
+
+        session = loop.run_until_complete(_make_session())
+        self._session = session
         try:
-            await self._ws_listener()
+            loop.run_until_complete(self._ws_listener())
+        except RuntimeError:
+            pass   # loop.stop() interrupts run_until_complete
         finally:
-            await self._session.close()
-            self._session = None
+            # loop.stop() skips any finally inside the coroutine, so close
+            # this run's session here ("Unclosed client session" otherwise)
+            if self._session is session:
+                self._session = None
+            try:
+                loop.run_until_complete(session.close())
+            except Exception:
+                pass
 
     async def _ws_listener(self) -> None:
+        generation = self._generation
         retry = 2.0
-        while self._running:
+        while self._running and generation == self._generation:
             try:
                 async with websockets.connect(
                     self._ws_url,
                     ping_interval=None,   # server sends JSON {"type":"ping"} every 25 s
                     open_timeout=10,
                 ) as ws:
+                    if generation != self._generation:
+                        return
                     self.ws_connected.emit()
                     retry = 2.0
                     async for raw in ws:
+                        if generation != self._generation:
+                            return
                         try:
                             data = json.loads(raw)
                         except json.JSONDecodeError:
@@ -84,7 +104,7 @@ class ApiClient(QObject):
                         # "ping" messages from server are ignored (keepalive only)
             except Exception:
                 pass
-            if self._running:
+            if self._running and generation == self._generation:
                 self.ws_disconnected.emit()
                 await asyncio.sleep(retry)
                 retry = min(retry * 1.5, 30.0)
