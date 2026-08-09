@@ -124,6 +124,15 @@ class PlayerPanel(QFrame):
         self._seek_timer.setSingleShot(True)
         self._seek_timer.timeout.connect(self._do_seek)
 
+        # Post-seek lock: keeps server state from snapping the slider back.
+        # A persistent timer (not QTimer.singleShot) so a NEW drag can cancel
+        # the previous lock — an old lock expiring mid-drag let a state_update
+        # yank the slider out of the user's hand and cancel the seek.
+        self._seek_lock_timer = QTimer(self)
+        self._seek_lock_timer.setSingleShot(True)
+        self._seek_lock_timer.setInterval(2500)
+        self._seek_lock_timer.timeout.connect(self._end_seek_lock)
+
         self._pending_vol: float | None = None
         self._vol_timer = QTimer(self)
         self._vol_timer.setSingleShot(True)
@@ -290,7 +299,8 @@ class PlayerPanel(QFrame):
 
         pos = float(state.get("position") or 0.0)
         self._position = pos
-        if not self._seeking and self._duration > 0:
+        if (not self._seeking and not self._progress.isSliderDown()
+                and self._duration > 0):
             self._progress.setValue(int(pos / self._duration * 1000))
         self._elapsed.setText(_fmt(pos))
 
@@ -370,6 +380,7 @@ class PlayerPanel(QFrame):
     def _on_seek_press(self) -> None:
         self._seeking = True
         self._seek_timer.stop()
+        self._seek_lock_timer.stop()   # a new drag supersedes the old lock
 
     def _on_seek_release(self) -> None:
         if self._duration > 0:
@@ -379,7 +390,7 @@ class PlayerPanel(QFrame):
 
     def _do_seek(self) -> None:
         self.seek_requested.emit(self._position)
-        QTimer.singleShot(2500, self._end_seek_lock)
+        self._seek_lock_timer.start()
 
     def _end_seek_lock(self) -> None:
         self._seeking = False
