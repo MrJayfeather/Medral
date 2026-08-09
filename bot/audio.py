@@ -178,7 +178,11 @@ async def get_stream_url(track: Track) -> str:
 
 AUDIO_CACHE_DIR = os.path.join(tempfile.gettempdir(), "medral_audio")
 MAX_CACHE_FILE_BYTES = 250 * 1024 * 1024   # bigger than this → stream directly
-DOWNLOAD_TIMEOUT = 120                     # s; typical download is ~1-3 s
+DOWNLOAD_TIMEOUT = 30          # s; beyond this fall back to direct streaming
+DOWNLOAD_CHUNK = 10 * 1024 * 1024  # googlevideo bursts per-request: ranged
+                                   # chunks dodge its ~realtime pacing
+PREBUFFER_MIN_DURATION = 8 * 60    # only long tracks suffer from pacing —
+                                   # short ones start instantly via streaming
 
 
 def _purge_cache(max_age: float = 6 * 3600) -> None:
@@ -193,24 +197,36 @@ def _purge_cache(max_age: float = 6 * 3600) -> None:
 
 
 def _download_to_cache(url: str, key: str) -> str:
-    """Blocking full download of the audio stream into the cache dir."""
+    """Blocking download of the full audio stream into the cache dir.
+
+    Downloads in separate ranged requests: googlevideo serves each request
+    with an initial fast burst, then throttles to ~realtime — one sequential
+    read of a 25-minute track takes minutes, ranged 10MB chunks take seconds.
+    """
     os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
     _purge_cache()
     path = os.path.join(AUDIO_CACHE_DIR, key)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
     tmp_path = path + ".part"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    total = 0
-    with urllib.request.urlopen(req, timeout=30) as resp, open(tmp_path, "wb") as f:
+    pos = 0
+    with open(tmp_path, "wb") as f:
         while True:
-            chunk = resp.read(1 << 18)
-            if not chunk:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Range": f"bytes={pos}-{pos + DOWNLOAD_CHUNK - 1}",
+            })
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+                status = resp.status
+            if not data:
                 break
-            total += len(chunk)
-            if total > MAX_CACHE_FILE_BYTES:
+            f.write(data)
+            pos += len(data)
+            if pos > MAX_CACHE_FILE_BYTES:
                 raise ValueError("stream too large to cache")
-            f.write(chunk)
+            if status == 200 or len(data) < DOWNLOAD_CHUNK:
+                break  # whole body served at once, or final short chunk
     os.replace(tmp_path, path)
     return path
 
@@ -255,6 +271,9 @@ class MusicPlayer:
         self._intentional_stop: bool = False
         self._seeking: bool = False
         self.loop_mode: str = LOOP_NONE
+        # Serializes play_next/seek — a seek arriving while the next track is
+        # still downloading must not spawn a second concurrent audio source.
+        self._play_lock = asyncio.Lock()
 
         # progress tracking
         self._play_started_at: float = 0.0
@@ -299,11 +318,20 @@ class MusicPlayer:
         await self._on_state_change(self.guild_id)
 
     async def play_next(self) -> None:
+        async with self._play_lock:
+            await self._play_next_locked()
+
+    async def _play_next_locked(self) -> None:
         if not self.voice_client or not self.voice_client.is_connected():
             if self.current:
                 self.history.append(self.current)
                 self.current = None
             await self._on_state_change(self.guild_id)
+            return
+
+        # A stacked/late play_next (queued while another one was downloading
+        # or seeking) must not restart or steal an already-active source.
+        if self.voice_client.is_playing() or self.voice_client.is_paused():
             return
 
         # Route the finished track according to loop mode. current may already
@@ -319,43 +347,47 @@ class MusicPlayer:
                 self.history.append(self.current)
             self.current = None
 
-        if not self.queue:
-            await self._on_state_change(self.guild_id)
-            return
+        # Loop (not recursion): unavailable tracks are dropped into history
+        # and the next queued one is tried, so one dead track can't wedge
+        # the queue or cycle forever under loop one/all.
+        while True:
+            if not self.queue:
+                await self._on_state_change(self.guild_id)
+                return
 
-        self.current = self.queue.popleft()
-        self._paused = False
-        self._total_paused = 0.0
+            self.current = self.queue.popleft()
+            self._paused = False
+            self._total_paused = 0.0
 
-        try:
-            stream_url = await get_stream_url(self.current)
-            self._current_stream_url = stream_url
+            try:
+                stream_url = await get_stream_url(self.current)
+                self._current_stream_url = stream_url
 
-            local = await download_track(stream_url, self.current)
-            old_file = self._current_file
-            self._current_file = local
-            if old_file and old_file != local:
-                try:
-                    os.remove(old_file)
-                except OSError:
-                    pass
+                # Only long tracks are pre-downloaded — they are the ones
+                # YouTube's stream pacing starves mid-play. duration 0 means
+                # unknown (possibly live) — stream those directly too.
+                local = None
+                if 0 < self.current.duration and self.current.duration >= PREBUFFER_MIN_DURATION:
+                    local = await download_track(stream_url, self.current)
 
-            if local:
-                raw_source = discord.FFmpegPCMAudio(local, options="-vn")
-            else:
-                raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-            source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
-        except Exception as exc:
-            # Track unavailable (deleted, age-restricted, ...) — drop it into
-            # history and skip to the next one. Dropping (instead of letting
-            # the loop logic re-queue it) keeps a dead track from cycling
-            # forever under loop one/all. Recursion is safe: the queue is
-            # finite and shrinks each call.
-            print(f"[audio] cannot play {self.current.title}: {exc}")
-            self.history.append(self.current)
-            self.current = None
-            await self.play_next()
-            return
+                old_file = self._current_file
+                self._current_file = local
+                if old_file and old_file != local:
+                    try:
+                        os.remove(old_file)
+                    except OSError:
+                        pass
+
+                if local:
+                    raw_source = discord.FFmpegPCMAudio(local, options="-vn")
+                else:
+                    raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+                source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
+                break
+            except Exception as exc:
+                print(f"[audio] cannot play {self.current.title}: {exc}")
+                self.history.append(self.current)
+                self.current = None
 
         self._play_started_at = time.time()
         loop = asyncio.get_running_loop()
@@ -384,6 +416,10 @@ class MusicPlayer:
             self._total_paused += time.time() - self._pause_started_at
 
     async def seek(self, position: float) -> None:
+        async with self._play_lock:
+            await self._seek_locked(position)
+
+    async def _seek_locked(self, position: float) -> None:
         if not self.current or not self.voice_client or not self.voice_client.is_connected():
             return
         if not self._current_file and not self._current_stream_url:
