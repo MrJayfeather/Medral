@@ -145,8 +145,8 @@ class _ResultRow(QFrame):
 
     def set_track(self, track: dict) -> None:
         self._url = track.get("webpage_url", "")
-        title  = track.get("title",  "Unknown Title")
-        artist = track.get("artist", "Unknown Artist")
+        title  = str(track.get("title") or "Unknown Title")
+        artist = str(track.get("artist") or "Unknown Artist")
         dur    = int(track.get("duration") or 0)
         m, s   = divmod(dur, 60)
 

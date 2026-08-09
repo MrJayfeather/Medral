@@ -370,7 +370,31 @@ def _load_fonts() -> None:
             QFontDatabase.addApplicationFont(str(f))
 
 
+def _install_excepthook() -> None:
+    """Log unhandled slot exceptions instead of letting PyQt6 abort the app.
+
+    Without a custom excepthook PyQt6 calls qFatal() on any Python exception
+    that escapes a slot — the process dies with 0xc0000409 and no trace.
+    """
+    import traceback
+    from datetime import datetime
+    log_file = Path.home() / ".medral" / "client.log"
+
+    def hook(exc_type, exc_value, exc_tb):
+        try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] Unhandled exception:\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            pass
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = hook
+
+
 def main() -> None:
+    _install_excepthook()
     app = QApplication(sys.argv)
     app.setApplicationName("Medral")
     app.setStyleSheet(STYLESHEET)

@@ -38,7 +38,7 @@ FFMPEG_OPTIONS = {
     "before_options": (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
     ),
-    "options": "-vn -ar 48000 -ac 2",
+    "options": "-vn",  # FFmpegPCMAudio appends -f s16le -ar 48000 -ac 2 itself
 }
 
 
@@ -69,10 +69,12 @@ async def _yt_extract(opts: dict, query: str) -> dict:
 
 
 def _entry_to_track(entry: dict) -> Track:
+    # NB: .get(key, default) does NOT protect against explicit None values —
+    # deleted/private playlist entries come with "title": None
     return Track(
-        webpage_url=entry.get("webpage_url") or entry.get("url", ""),
-        title=entry.get("title", "Unknown Title"),
-        artist=(
+        webpage_url=entry.get("webpage_url") or entry.get("url") or "",
+        title=str(entry.get("title") or "Unknown Title"),
+        artist=str(
             entry.get("uploader")
             or entry.get("channel")
             or "Unknown Artist"
@@ -134,6 +136,12 @@ async def load_playlist(url: str, max_tracks: int = 100) -> List[Track]:
     tracks: List[Track] = []
     for e in entries:
         if not e:
+            continue
+        # Deleted/private videos: title is None or a placeholder, no duration
+        raw_title = e.get("title")
+        if raw_title in ("[Deleted video]", "[Private video]") or (
+            raw_title is None and not e.get("duration")
+        ):
             continue
         try:
             t = _entry_to_track(e)
@@ -317,7 +325,7 @@ class MusicPlayer:
             "before_options": (
                 f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {position:.2f}"
             ),
-            "options": "-vn -ar 48000 -ac 2",
+            "options": "-vn",  # FFmpegPCMAudio appends -f s16le -ar 48000 -ac 2 itself
         }
         raw_source = discord.FFmpegPCMAudio(self._current_stream_url, **seek_opts)
         source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)

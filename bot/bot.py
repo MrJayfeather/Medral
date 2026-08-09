@@ -85,7 +85,13 @@ def _is_alone(p: MusicPlayer) -> bool:
     channel = p.voice_client.channel if p.voice_client else None
     if channel is None:
         return False
-    return not any(not m.bot for m in channel.members)
+    members = channel.members
+    # After a bot restart the member cache may be empty/stale. Trust it only
+    # when it can at least see the bot itself sitting in the channel —
+    # otherwise we'd kick ourselves out mid-playback with listeners present.
+    if not any(m.id == bot.user.id for m in members):
+        return False
+    return not any(not m.bot for m in members)
 
 
 async def _auto_leave(guild_id: int) -> None:

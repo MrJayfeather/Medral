@@ -140,8 +140,8 @@ class _QueueRow(QWidget):
         info = QVBoxLayout()
         info.setSpacing(2)
 
-        title  = track.get("title",  "Unknown")
-        artist = track.get("artist", "")
+        title  = str(track.get("title") or "Unknown")
+        artist = str(track.get("artist") or "")
         dur    = int(track.get("duration") or 0)
         m, s   = divmod(dur, 60)
 

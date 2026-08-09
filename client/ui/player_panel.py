@@ -265,8 +265,8 @@ class PlayerPanel(QFrame):
             self._reset()
             return
 
-        title    = current.get("title",  "Unknown")
-        artist   = current.get("artist", "Unknown")
+        title    = str(current.get("title") or "Unknown")
+        artist   = str(current.get("artist") or "Unknown")
         duration = int(current.get("duration") or 0)
         thumb    = current.get("thumbnail", "") or ""
 
