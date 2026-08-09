@@ -270,11 +270,13 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit
         from PyQt6.QtWidgets import QPushButton as _Btn
 
+        from defaults import DEFAULT_HOST, DEFAULT_PORT
+
         cfg_file = Path.home() / ".medral" / "config.json"
         try:
             cfg = json.loads(cfg_file.read_text())
         except Exception:
-            cfg = {"host": "89.124.90.59", "port": 8000}
+            cfg = {"host": DEFAULT_HOST, "port": DEFAULT_PORT}
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Change server")
@@ -285,7 +287,7 @@ class MainWindow(QMainWindow):
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Host"))
-        host_edit = QLineEdit(cfg.get("host", "89.124.90.59"))
+        host_edit = QLineEdit(cfg.get("host", DEFAULT_HOST))
         row1.addWidget(host_edit)
         lay.addLayout(row1)
 

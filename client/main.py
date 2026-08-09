@@ -47,6 +47,7 @@ from PyQt6.QtGui import QFont
 sys.path.insert(0, str(Path(__file__).parent))
 
 from styles          import STYLESHEET
+from defaults        import DEFAULT_HOST, DEFAULT_PORT
 from network         import ApiClient
 from ui.main_window   import MainWindow
 from ui.splash_screen import SplashScreen
@@ -73,7 +74,7 @@ def _load_config() -> dict:
     try:
         return json.loads(CONFIG_FILE.read_text())
     except Exception:
-        return {"host": "89.124.90.59", "port": 8000}
+        return {"host": DEFAULT_HOST, "port": DEFAULT_PORT}
 
 
 def _save_config(cfg: dict) -> None:
@@ -355,8 +356,8 @@ def main() -> None:
     app.setFont(QFont("DM Sans", 10))
 
     cfg  = _load_config()
-    host = cfg.get("host", "89.124.90.59")
-    port = cfg.get("port", 8000)
+    host = cfg.get("host", DEFAULT_HOST)
+    port = cfg.get("port", DEFAULT_PORT)
 
     client = ApiClient(host, port)
     client.start()
