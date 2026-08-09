@@ -210,23 +210,39 @@ def _download_to_cache(url: str, key: str) -> str:
         return path
     tmp_path = path + ".part"
     pos = 0
+    total = None   # unknown until the first response tells us
+    stall_retries = 0
     with open(tmp_path, "wb") as f:
-        while True:
+        while total is None or pos < total:
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0",
                 "Range": f"bytes={pos}-{pos + DOWNLOAD_CHUNK - 1}",
             })
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = resp.read()
-                status = resp.status
+                if total is None:
+                    # "Content-Range: bytes 0-999/23814570" → full size;
+                    # a plain 200 means ranges are unsupported — trust
+                    # Content-Length instead.
+                    crange = resp.headers.get("Content-Range", "")
+                    if "/" in crange:
+                        total = int(crange.rsplit("/", 1)[1])
+                    elif resp.status == 200:
+                        total = int(resp.headers.get("Content-Length") or len(data))
+                    if total > MAX_CACHE_FILE_BYTES:
+                        raise ValueError("stream too large to cache")
             if not data:
-                break
+                # Server can close a response early — retry the same offset a
+                # few times before giving up
+                stall_retries += 1
+                if stall_retries > 5:
+                    raise IOError(f"download stalled at {pos}/{total}")
+                continue
+            stall_retries = 0
             f.write(data)
             pos += len(data)
-            if pos > MAX_CACHE_FILE_BYTES:
-                raise ValueError("stream too large to cache")
-            if status == 200 or len(data) < DOWNLOAD_CHUNK:
-                break  # whole body served at once, or final short chunk
+    if total is not None and pos < total:
+        raise IOError(f"incomplete download: {pos}/{total}")
     os.replace(tmp_path, path)
     return path
 
