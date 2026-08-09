@@ -1,6 +1,10 @@
 import asyncio
+import hashlib
+import os
 import random
+import tempfile
 import time
+import urllib.request
 import yt_dlp
 import discord
 from dataclasses import dataclass
@@ -166,6 +170,65 @@ async def get_stream_url(track: Track) -> str:
     return data.get("url", "")
 
 
+# ------------------------------------------------------------------ local cache
+# YouTube paces long streams down to ~realtime after an initial burst, which
+# starves FFmpeg a few minutes into long tracks (audible stutter). The VPS
+# pulls from googlevideo at tens of MB/s, so a full pre-download is ~1 s and
+# makes playback (and seeking) completely independent of YouTube's pacing.
+
+AUDIO_CACHE_DIR = os.path.join(tempfile.gettempdir(), "medral_audio")
+MAX_CACHE_FILE_BYTES = 250 * 1024 * 1024   # bigger than this → stream directly
+DOWNLOAD_TIMEOUT = 120                     # s; typical download is ~1-3 s
+
+
+def _purge_cache(max_age: float = 6 * 3600) -> None:
+    try:
+        now = time.time()
+        for name in os.listdir(AUDIO_CACHE_DIR):
+            path = os.path.join(AUDIO_CACHE_DIR, name)
+            if now - os.path.getmtime(path) > max_age:
+                os.remove(path)
+    except OSError:
+        pass
+
+
+def _download_to_cache(url: str, key: str) -> str:
+    """Blocking full download of the audio stream into the cache dir."""
+    os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
+    _purge_cache()
+    path = os.path.join(AUDIO_CACHE_DIR, key)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    tmp_path = path + ".part"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    total = 0
+    with urllib.request.urlopen(req, timeout=30) as resp, open(tmp_path, "wb") as f:
+        while True:
+            chunk = resp.read(1 << 18)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_CACHE_FILE_BYTES:
+                raise ValueError("stream too large to cache")
+            f.write(chunk)
+    os.replace(tmp_path, path)
+    return path
+
+
+async def download_track(stream_url: str, track: Track) -> Optional[str]:
+    """Pre-download audio to disk; None on any failure (caller streams)."""
+    key = hashlib.md5(track.webpage_url.encode()).hexdigest()[:16] + ".audio"
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: _download_to_cache(stream_url, key)),
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+    except Exception as exc:
+        print(f"[audio] cache download failed ({exc}); falling back to streaming")
+        return None
+
+
 # Loop modes
 LOOP_NONE = "none"
 LOOP_ONE = "one"
@@ -198,6 +261,7 @@ class MusicPlayer:
         self._pause_started_at: float = 0.0
         self._total_paused: float = 0.0
         self._current_stream_url: str = ""
+        self._current_file: Optional[str] = None   # local cache copy, if any
 
     # ------------------------------------------------------------------ props
 
@@ -267,7 +331,19 @@ class MusicPlayer:
             stream_url = await get_stream_url(self.current)
             self._current_stream_url = stream_url
 
-            raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+            local = await download_track(stream_url, self.current)
+            old_file = self._current_file
+            self._current_file = local
+            if old_file and old_file != local:
+                try:
+                    os.remove(old_file)
+                except OSError:
+                    pass
+
+            if local:
+                raw_source = discord.FFmpegPCMAudio(local, options="-vn")
+            else:
+                raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
             source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
         except Exception as exc:
             # Track unavailable (deleted, age-restricted, ...) — drop it into
@@ -310,7 +386,7 @@ class MusicPlayer:
     async def seek(self, position: float) -> None:
         if not self.current or not self.voice_client or not self.voice_client.is_connected():
             return
-        if not self._current_stream_url:
+        if not self._current_file and not self._current_stream_url:
             return
         position = max(0.0, position)
         if self.current.duration > 0:
@@ -321,13 +397,22 @@ class MusicPlayer:
             self.voice_client.stop()
             await asyncio.sleep(0.15)  # let _after fire before we start new source
 
-        seek_opts = {
-            "before_options": (
-                f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {position:.2f}"
-            ),
-            "options": "-vn",  # FFmpegPCMAudio appends -f s16le -ar 48000 -ac 2 itself
-        }
-        raw_source = discord.FFmpegPCMAudio(self._current_stream_url, **seek_opts)
+        if self._current_file:
+            # Local cache copy — instant seek, no risk of a stale stream URL
+            seek_opts = {
+                "before_options": f"-ss {position:.2f}",
+                "options": "-vn",
+            }
+            seek_target = self._current_file
+        else:
+            seek_opts = {
+                "before_options": (
+                    f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {position:.2f}"
+                ),
+                "options": "-vn",
+            }
+            seek_target = self._current_stream_url
+        raw_source = discord.FFmpegPCMAudio(seek_target, **seek_opts)
         source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
 
         self._play_started_at = time.time() - position
@@ -431,6 +516,12 @@ class MusicPlayer:
             self.voice_client = None
         self.current = None
         self._paused = False
+        if self._current_file:
+            try:
+                os.remove(self._current_file)
+            except OSError:
+                pass
+            self._current_file = None
         await self._on_state_change(self.guild_id)
 
     # ------------------------------------------------------------------ state
