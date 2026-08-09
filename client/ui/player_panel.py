@@ -4,6 +4,7 @@ import time
 
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget,
+    QStyle, QToolTip,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl, QPointF, QRect
 from PyQt6.QtGui import (
@@ -15,6 +16,39 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 def _fmt(seconds: int) -> str:
     s = max(0, int(seconds))
     return f"{s // 60}:{s % 60:02d}"
+
+
+class _SeekSlider(QSlider):
+    """Progress slider with hover timestamps and click-to-jump.
+
+    A plain click anywhere on the track moves the handle there and starts
+    the normal press→release seek flow; hovering shows the time at the
+    cursor as a tooltip.
+    """
+
+    def __init__(self, orientation, duration_provider, parent=None) -> None:
+        super().__init__(orientation, parent)
+        self._duration_provider = duration_provider
+        self.setMouseTracking(True)
+
+    def _value_at(self, x: float) -> int:
+        return QStyle.sliderValueFromPosition(
+            self.minimum(), self.maximum(), int(x), max(1, self.width())
+        )
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            # Move the handle under the cursor first, then let the normal
+            # press grab it — a click seeks, dragging still works.
+            self.setSliderPosition(self._value_at(ev.position().x()))
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:
+        duration = self._duration_provider()
+        if duration > 0:
+            secs = self._value_at(ev.position().x()) / max(1, self.maximum()) * duration
+            QToolTip.showText(ev.globalPosition().toPoint(), _fmt(secs), self)
+        super().mouseMoveEvent(ev)
 
 
 def _rounded_pixmap(px: QPixmap, r: int = 12) -> QPixmap:
@@ -197,7 +231,7 @@ class PlayerPanel(QFrame):
         prog_wrap = QVBoxLayout()
         prog_wrap.setSpacing(4)
 
-        self._progress = QSlider(Qt.Orientation.Horizontal)
+        self._progress = _SeekSlider(Qt.Orientation.Horizontal, lambda: self._duration)
         self._progress.setRange(0, 1000)
         self._progress.setValue(0)
         self._progress.sliderPressed.connect(self._on_seek_press)
