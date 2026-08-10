@@ -306,6 +306,18 @@ class LoginDialog(QDialog):
         self._login_btn.setDefault(True)
         self._login_btn.clicked.connect(self._start_login)
         root.addWidget(self._login_btn)
+        root.addSpacing(8)
+
+        # Для тех, у кого нужный Discord-аккаунт в другом браузере:
+        # копирует ссылку входа вместо открытия браузера по умолчанию.
+        self._copy_btn = QPushButton("Скопировать ссылку для другого браузера")
+        self._copy_btn.setStyleSheet(
+            "QPushButton { background:transparent; border:none; color:#6b6b8a;"
+            " font-size:11px; text-decoration:underline; }"
+            "QPushButton:hover { color:#A78BFA; }"
+        )
+        self._copy_btn.clicked.connect(self._copy_login_link)
+        root.addWidget(self._copy_btn)
         root.addSpacing(10)
 
         self._status = QLabel("")
@@ -321,13 +333,27 @@ class LoginDialog(QDialog):
 
     # ── login flow ────────────────────────────────────────────────────────
 
-    def _start_login(self) -> None:
+    def _begin(self, open_browser: bool) -> None:
         self._state    = secrets.token_urlsafe(24)
         self._deadline = time.monotonic() + 180
         self._login_btn.setEnabled(False)
-        self._status.setText("Открыл браузер — подтверди вход и вернись сюда…")
-        webbrowser.open(f"http://{self._host}:{self._port}/auth/login?state={self._state}")
+        url = f"http://{self._host}:{self._port}/auth/login?state={self._state}"
+        if open_browser:
+            self._status.setText("Открыл браузер — подтверди вход и вернись сюда…")
+            webbrowser.open(url)
+        else:
+            QApplication.clipboard().setText(url)
+            self._status.setText(
+                "Ссылка скопирована — вставь её в браузер с нужным "
+                "аккаунтом Discord и подтверди вход"
+            )
         self._timer.start()
+
+    def _start_login(self) -> None:
+        self._begin(open_browser=True)
+
+    def _copy_login_link(self) -> None:
+        self._begin(open_browser=False)
 
     def _fail(self, message: str) -> None:
         self._status.setText(message)
