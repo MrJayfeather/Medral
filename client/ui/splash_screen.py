@@ -1,7 +1,7 @@
 import math
 from PyQt6.QtWidgets import QWidget, QApplication
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QPointF, QRect
-from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QLinearGradient
+from PyQt6.QtGui import QPainter, QColor, QFont, QPen, QBrush, QLinearGradient
 
 
 class SplashScreen(QWidget):
@@ -43,7 +43,8 @@ class SplashScreen(QWidget):
         self._fading = True
 
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.025) % (math.pi * 200)
+        # slow breathing: full ring cycle ~8.5 s at 16 ms ticks
+        self._phase = (self._phase + 0.012) % (math.pi * 200)
         if self._progress < 1.0:
             self._progress = min(1.0, self._progress + 0.006)
         if self._fading:
@@ -74,14 +75,19 @@ class SplashScreen(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(1, 1, w - 2, h - 2, 23, 23)
 
-        # Pulsing rings
+        # Pulsing rings — slow breath, soft accent gradient along the stroke
         for i in range(3):
             phase = self._phase + i * 2.09
             base_r = 62 + i * 28
-            r = base_r + math.sin(phase) * 9
-            alpha = int((78 - i * 22) * self._alpha / 255)
-            ring_pen = QPen(QColor(108, 99, 255, alpha))
-            ring_pen.setWidthF(1.5)
+            r = base_r + math.sin(phase) * 6
+            # gentle alpha breathing in sync with the radius
+            breath = 0.8 + 0.2 * math.sin(phase)
+            alpha = int((78 - i * 22) * breath * self._alpha / 255)
+
+            ring_grad = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
+            ring_grad.setColorAt(0.0, QColor(108, 99, 255, alpha))
+            ring_grad.setColorAt(1.0, QColor(167, 139, 250, int(alpha * 0.55)))
+            ring_pen = QPen(QBrush(ring_grad), 1.4)
             p.setPen(ring_pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(QPointF(cx, cy), r, r)

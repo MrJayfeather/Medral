@@ -531,12 +531,23 @@ class ConnectDialog(QDialog):
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def _load_fonts() -> None:
-    """Try to load Syne + DM Sans from ~/.medral/fonts/ if present."""
+    """Load Syne + DM Sans.
+
+    Primary source: fonts/ shipped next to the code (client/fonts in dev,
+    _MEIPASS/fonts inside the PyInstaller exe).  Fallback: ~/.medral/fonts.
+    """
     from PyQt6.QtGui import QFontDatabase
-    fonts_dir = Path.home() / ".medral" / "fonts"
-    if fonts_dir.is_dir():
-        for f in fonts_dir.glob("*.ttf"):
-            QFontDatabase.addApplicationFont(str(f))
+    bundled  = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "fonts"
+    fallback = Path.home() / ".medral" / "fonts"
+    loaded = 0
+    for fonts_dir in (bundled, fallback):
+        if not fonts_dir.is_dir():
+            continue
+        for f in sorted(fonts_dir.glob("*.ttf")):
+            if QFontDatabase.addApplicationFont(str(f)) >= 0:
+                loaded += 1
+        if loaded:
+            break
 
 
 def _install_excepthook() -> None:

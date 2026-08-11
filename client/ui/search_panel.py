@@ -2,8 +2,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QLabel, QFrame, QSizePolicy,
 )
-from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import pyqtSignal, Qt, QEasingCurve, QRectF, QVariantAnimation
+from PyQt6.QtGui import QKeyEvent, QColor, QPainter, QPen
+
+from ui.anim import glow, stagger
 
 
 class SearchPanel(QWidget):
@@ -63,12 +65,22 @@ class SearchPanel(QWidget):
         has = bool(tracks)
         self._set_loading(False)
         self._results_widget.setVisible(has)
+        shown: list[_ResultRow] = []
         for i, row in enumerate(self._result_rows):
             if i < len(tracks):
                 row.set_track(tracks[i])
                 row.setVisible(True)
+                shown.append(row)
             else:
                 row.setVisible(False)
+        if shown:
+            # settle geometry first so the slide targets are correct
+            lay = self._results_widget.layout()
+            if lay is not None:
+                lay.activate()
+            if self.layout() is not None:
+                self.layout().activate()
+            stagger(shown, step_ms=55, ms=320, dy=10)
 
     def clear(self) -> None:
         self._input.clear()
@@ -106,13 +118,35 @@ class SearchPanel(QWidget):
 
 # ── result row widget ──────────────────────────────────────────────────────
 
+class _GlowButton(QPushButton):
+    """Push button with an accent glow while hovered."""
+
+    def enterEvent(self, ev) -> None:
+        glow(self, blur=18)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        if self.graphicsEffect() is not None:
+            self.setGraphicsEffect(None)
+        super().leaveEvent(ev)
+
+
 class _ResultRow(QFrame):
     play_clicked = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("searchResultRow")
+        # frame background is painted here (animated hover) — mute the QSS one
+        self.setStyleSheet(
+            "QFrame#searchResultRow { background: transparent; border: none; }"
+        )
         self._url = ""
+        self._hover = 0.0
+        self._hover_anim = QVariantAnimation(self)
+        self._hover_anim.setDuration(150)
+        self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._hover_anim.valueChanged.connect(self._on_hover_tick)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -136,7 +170,7 @@ class _ResultRow(QFrame):
 
         lay.addLayout(info, 1)
 
-        btn = QPushButton("▶")
+        btn = _GlowButton("▶")
         btn.setObjectName("resultPlayBtn")
         btn.setFixedSize(32, 32)
         btn.setToolTip("Add to queue")
@@ -153,6 +187,39 @@ class _ResultRow(QFrame):
         self._title.setText(_elide(title, 60))
         self._title.setToolTip(title)
         self._meta.setText(f"{artist}  •  {m}:{s:02d}")
+
+    # ── animated hover ────────────────────────────────────────────────────
+
+    def _on_hover_tick(self, v) -> None:
+        self._hover = float(v)
+        self.update()
+
+    def _animate_hover(self, end: float) -> None:
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover)
+        self._hover_anim.setEndValue(end)
+        self._hover_anim.start()
+
+    def enterEvent(self, ev) -> None:
+        self._animate_hover(1.0)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self._animate_hover(0.0)
+        super().leaveEvent(ev)
+
+    def paintEvent(self, ev) -> None:
+        # SURFACE2 → SURFACE2 + 7% accent tint, border fades in with hover
+        t = self._hover
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        bg = QColor(22 + round(6 * t), 22 + round(5 * t), 42 + round(15 * t))
+        border = QColor(0x6C, 0x63, 0xFF)
+        border.setAlphaF(t)
+        p.setPen(QPen(border, 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, 12.0, 12.0)
 
 
 def _elide(text: str, max_len: int) -> str:

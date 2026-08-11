@@ -1,10 +1,15 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QComboBox, QLabel, QFrame, QPushButton,
+    QGraphicsOpacityEffect,
 )
-from PyQt6.QtCore import Qt, pyqtSlot, QTimer
+from PyQt6.QtCore import (
+    Qt, pyqtSlot, QTimer, QPoint, QAbstractAnimation, QEasingCurve,
+    QParallelAnimationGroup, QPropertyAnimation,
+)
 
 from network import ApiClient
+from ui import anim
 from ui.background_widget import BackgroundWidget
 from ui.channel_panel      import ChannelPanel
 from ui.search_panel       import SearchPanel
@@ -32,6 +37,8 @@ class MainWindow(QMainWindow):
         # открыть несколько LoginDialog при серии 401/4401
         self._login_handler = None
         self._login_active  = False
+
+        self._intro_played = False   # one-shot cascade on first show
 
         self.setWindowTitle("Medral")
         self.setMinimumSize(960, 620)
@@ -106,6 +113,7 @@ class MainWindow(QMainWindow):
         bar = QFrame()
         bar.setObjectName("topBar")
         bar.setFixedHeight(52)
+        self._top_bar = bar
 
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(20, 0, 20, 0)
@@ -130,22 +138,26 @@ class MainWindow(QMainWindow):
         self._dot = QLabel("●")
         self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
         self._dot.setToolTip("WebSocket disconnected")
-        lay.addWidget(self._dot)
+        self._dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._user_lbl = QLabel("")
         self._user_lbl.setStyleSheet("color:#6b6b8a; background:transparent;")
-        lay.addWidget(self._user_lbl)
+        self._user_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+        lay.addWidget(self._user_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         change_btn = QPushButton("⚙")
         change_btn.setToolTip("Change server")
         change_btn.setFixedSize(32, 32)
         change_btn.setStyleSheet(
             "QPushButton { background:#16162a; border:1px solid #2a2a40;"
-            " border-radius:8px; color:#e8e8f5; font-size:15px; }"
+            " border-radius:8px; color:#e8e8f5; font-size:15px; padding:0; }"
             "QPushButton:hover { background:#1e1e32; border-color:#6C63FF; }"
         )
         change_btn.clicked.connect(self._on_change_server)
-        lay.addWidget(change_btn)
+        lay.addWidget(change_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         return bar
 
@@ -254,11 +266,13 @@ class MainWindow(QMainWindow):
     def _on_ws_up(self) -> None:
         self._dot.setStyleSheet("color:#34d399; font-size:14px; background:transparent;")
         self._dot.setToolTip("Connected")
+        anim.pulse(self._dot, ms=2000, low=0.35)   # soft breathing while live
         self.statusBar().showMessage("Connected", 3000)
         self.client.fetch_guilds()
 
     @pyqtSlot()
     def _on_ws_down(self) -> None:
+        anim.stop_pulse(self._dot)
         self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
         self._dot.setToolTip("Disconnected — retrying…")
         self.statusBar().showMessage("Disconnected — reconnecting…")
@@ -417,6 +431,82 @@ class MainWindow(QMainWindow):
         self._state    = {}
         self.client.set_server(host, port)
         self.statusBar().showMessage(f"Connecting to {host}:{port}…")
+
+    # ── intro cascade ─────────────────────────────────────────────────────
+
+    def _intro_plan(self):
+        # widget, dx, dy, delay_ms — sidebar slides from the left, top bar
+        # from above, content panels fade upward; ~500 ms total cascade
+        return [
+            (self.ch_panel,     -16,   0,   0),
+            (self._top_bar,       0, -12,  60),
+            (self.search_panel,   0,  14, 130),
+            (self.player_panel,   0,  14, 200),
+            (self.queue_panel,    0,  14, 270),
+        ]
+
+    def _intro_fade(self, widget, dx: int = 0, dy: int = 0, ms: int = 380) -> None:
+        """anim.fade_in twin with horizontal offset support (fade_in is dy-only)."""
+        try:
+            if dx == 0:
+                anim.fade_in(widget, ms, dy)
+                return
+
+            effect = QGraphicsOpacityEffect(widget)
+            effect.setOpacity(0.0)
+            widget.setGraphicsEffect(effect)
+
+            group = QParallelAnimationGroup(widget)
+
+            fade = QPropertyAnimation(effect, b"opacity", group)
+            fade.setDuration(ms)
+            fade.setStartValue(0.0)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(QEasingCurve.Type.OutQuint)
+            group.addAnimation(fade)
+
+            end = widget.pos()
+            slide = QPropertyAnimation(widget, b"pos", group)
+            slide.setDuration(ms)
+            slide.setStartValue(end + QPoint(dx, dy))
+            slide.setEndValue(end)
+            slide.setEasingCurve(QEasingCurve.Type.OutQuint)
+            group.addAnimation(slide)
+
+            def _cleanup() -> None:
+                try:
+                    if widget.graphicsEffect() is effect:
+                        widget.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass
+
+            group.finished.connect(_cleanup)
+            group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        except RuntimeError:
+            pass   # widget destroyed before its turn
+
+    def _play_intro(self) -> None:
+        for w, dx, dy, delay in self._intro_plan():
+            if delay == 0:
+                self._intro_fade(w, dx, dy)
+            else:
+                QTimer.singleShot(
+                    delay,
+                    lambda w=w, dx=dx, dy=dy: self._intro_fade(w, dx, dy),
+                )
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._intro_played:
+            return
+        self._intro_played = True
+        # hide intro targets before the first paint so nothing flashes
+        for w, *_ in self._intro_plan():
+            eff = QGraphicsOpacityEffect(w)
+            eff.setOpacity(0.0)
+            w.setGraphicsEffect(eff)
+        # defer one event-loop turn so the layout has final geometry
+        QTimer.singleShot(0, self._play_intro)
 
     # ── resize ────────────────────────────────────────────────────────────
 

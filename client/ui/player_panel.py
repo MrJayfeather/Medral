@@ -4,18 +4,28 @@ import time
 
 from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget,
-    QStyle, QToolTip,
+    QStyle, QToolTip, QGraphicsOpacityEffect,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QUrl, QPointF, QRect
+from PyQt6.QtCore import (
+    Qt, QTimer, pyqtSignal, QUrl, QPointF, QRect, QRectF, QSize,
+    QEasingCurve, QPropertyAnimation, QVariantAnimation,
+)
 from PyQt6.QtGui import (
     QPixmap, QPainter, QPainterPath, QColor, QLinearGradient, QRadialGradient,
+    QBrush, QFont,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+
+from ui.anim import glow
 
 
 def _fmt(seconds: int) -> str:
     s = max(0, int(seconds))
     return f"{s // 60}:{s % 60:02d}"
+
+
+def _window_minimized(w: QWidget) -> bool:
+    return bool(w.window().windowState() & Qt.WindowState.WindowMinimized)
 
 
 class _SeekSlider(QSlider):
@@ -65,7 +75,7 @@ def _rounded_pixmap(px: QPixmap, r: int = 12) -> QPixmap:
 
 
 _LOOP_ORDER = ["none", "all", "one"]        # click cycle: none → all → one → none
-_LOOP_ICONS = {"none": "🔁", "all": "🔁", "one": "🔂"}
+_LOOP_ICONS = {"none": "🔁︎", "all": "🔁︎", "one": "🔂︎"}
 _LOOP_TIPS  = {"none": "Loop: off", "all": "Loop: queue", "one": "Loop: track"}
 _LOOP_ACTIVE_QSS = (
     "QPushButton { color:#6C63FF; background-color:rgba(108,99,255,0.18);"
@@ -75,17 +85,119 @@ _LOOP_ACTIVE_QSS = (
 )
 
 
-class _EqWidget(QWidget):
-    """18-bar animated equalizer visualizer."""
+class _MarqueeLabel(QLabel):
+    """QLabel drop-in that scrolls its text when it does not fit.
 
-    _N = 18
+    Back-and-forth marquee: 2 s pause at each edge, smooth scroll between.
+    The timer runs only while scrolling is needed and the widget is visible.
+    """
+
+    _SPEED   = 40.0      # px per second
+    _PAUSE   = 2.0       # seconds at each edge
+    _TICK_MS = 30
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._off   = 0.0
+        self._phase = 0          # 0 pause-left, 1 →right, 2 pause-right, 3 →left
+        self._t0    = time.monotonic()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick_marquee)
+
+    def setText(self, text: str) -> None:
+        if text == self.text():
+            return               # frequent state updates must not reset scroll
+        super().setText(text)
+        self._restart()
+
+    def minimumSizeHint(self) -> QSize:
+        # never force the layout wider than the available space
+        return QSize(0, super().minimumSizeHint().height())
+
+    def _overflow(self) -> float:
+        return max(0.0, float(self.fontMetrics().horizontalAdvance(self.text())
+                              - self.contentsRect().width()))
+
+    def _restart(self) -> None:
+        self._off   = 0.0
+        self._phase = 0
+        self._t0    = time.monotonic()
+        if self._overflow() > 0 and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self._restart()
+
+    def showEvent(self, ev) -> None:
+        super().showEvent(ev)
+        if self._overflow() > 0:
+            self._timer.start()
+
+    def hideEvent(self, ev) -> None:
+        super().hideEvent(ev)
+        self._timer.stop()
+
+    def _tick_marquee(self) -> None:
+        if not self.isVisible() or _window_minimized(self):
+            return
+        ov = self._overflow()
+        if ov <= 0:
+            self._off = 0.0
+            self._timer.stop()
+            self.update()
+            return
+        now  = time.monotonic()
+        step = self._SPEED * self._TICK_MS / 1000.0
+        if self._phase in (0, 2):
+            if now - self._t0 >= self._PAUSE:
+                self._phase = 1 if self._phase == 0 else 3
+        elif self._phase == 1:
+            self._off = min(ov, self._off + step)
+            if self._off >= ov:
+                self._phase = 2
+                self._t0 = now
+            self.update()
+        else:
+            self._off = max(0.0, self._off - step)
+            if self._off <= 0:
+                self._phase = 0
+                self._t0 = now
+            self.update()
+
+    def paintEvent(self, ev) -> None:
+        if self._overflow() <= 0:
+            super().paintEvent(ev)
+            return
+        p = QPainter(self)
+        cr = self.contentsRect()
+        p.setClipRect(cr)
+        p.setFont(self.font())
+        p.setPen(self.palette().color(self.foregroundRole()))
+        tw = self.fontMetrics().horizontalAdvance(self.text())
+        r = QRectF(cr.x() - self._off, cr.y(), tw + 4, cr.height())
+        p.drawText(r, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   self.text())
+        p.end()
+
+
+class _EqWidget(QWidget):
+    """18-bar animated equalizer visualizer (rounded caps, soft decay)."""
+
+    _N    = 18
+    _IDLE = 0.05
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(36)
-        self._active  = False
-        self._heights = [0.05] * self._N
-        self._targets = [0.05] * self._N
+        self._active   = False
+        self._decaying = False
+        self._heights  = [self._IDLE] * self._N
+        self._targets  = [self._IDLE] * self._N
 
         self._timer = QTimer(self)
         self._timer.setInterval(80)
@@ -96,16 +208,51 @@ class _EqWidget(QWidget):
             return
         self._active = active
         if active:
-            self._timer.start()
+            self._decaying = False
+            if self.isVisible():
+                self._timer.start()
         else:
-            self._timer.stop()
-            self._heights = [0.05] * self._N
-            self.update()
+            # ease bars down (~400 ms) instead of snapping to the baseline
+            self._targets = [self._IDLE] * self._N
+            if self.isVisible():
+                self._decaying = True
+                self._timer.start()
+            else:
+                self._snap_idle()
+
+    def _snap_idle(self) -> None:
+        self._decaying = False
+        self._heights = [self._IDLE] * self._N
+        self._timer.stop()
+        self.update()
+
+    def showEvent(self, ev) -> None:
+        super().showEvent(ev)
+        if self._active or self._decaying:
+            self._timer.start()
+
+    def hideEvent(self, ev) -> None:
+        super().hideEvent(ev)
+        self._timer.stop()
+        if self._decaying:
+            self._snap_idle()    # finish the decay while invisible
 
     def _tick(self) -> None:
-        for i in range(self._N):
-            self._targets[i] = random.uniform(0.08, 1.0)
-            self._heights[i] += (self._targets[i] - self._heights[i]) * 0.35
+        if not self.isVisible() or _window_minimized(self):
+            return
+        if self._active:
+            for i in range(self._N):
+                self._targets[i] = random.uniform(0.08, 1.0)
+                self._heights[i] += (self._targets[i] - self._heights[i]) * 0.35
+        else:
+            done = True
+            for i in range(self._N):
+                self._heights[i] += (self._IDLE - self._heights[i]) * 0.45
+                if abs(self._heights[i] - self._IDLE) > 0.01:
+                    done = False
+            if done:
+                self._snap_idle()
+                return
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -118,7 +265,9 @@ class _EqWidget(QWidget):
         bar_w = max(2, (w - gap * (n - 1)) // n)
         total_w = n * bar_w + gap * (n - 1)
         x0 = (w - total_w) // 2
+        radius = bar_w / 2
 
+        p.setPen(Qt.PenStyle.NoPen)
         for i in range(n):
             bh = max(3, int(self._heights[i] * (h - 2)))
             x = x0 + i * (bar_w + gap)
@@ -127,7 +276,9 @@ class _EqWidget(QWidget):
             grad = QLinearGradient(x, y, x, h)
             grad.setColorAt(0.0, QColor(108, 99, 255, 220))
             grad.setColorAt(1.0, QColor(167, 139, 250, 100))
-            p.fillRect(x, y, bar_w, bh, grad)
+            p.setBrush(QBrush(grad))
+            # bottom edge extends past the widget so only the tops are rounded
+            p.drawRoundedRect(QRectF(x, y, bar_w, bh + radius), radius, radius)
 
         p.end()
 
@@ -176,6 +327,16 @@ class PlayerPanel(QFrame):
         self._nam = QNetworkAccessManager(self)
         self._nam.finished.connect(self._on_image_loaded)
 
+        # cover crossfade + blurred-backdrop state
+        self._art_anim: QVariantAnimation | None = None
+        self._pending_art: QPixmap | None = None
+        self._bg_small: QPixmap | None = None       # ~24px "blur" source
+        self._bg_old_small: QPixmap | None = None
+        self._bg_cache: QPixmap | None = None       # upscaled, per card size
+        self._bg_old_cache: QPixmap | None = None
+        self._bg_fade = 1.0
+        self._bg_anim: QVariantAnimation | None = None
+
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(500)
         self._tick_timer.timeout.connect(self._tick)
@@ -202,15 +363,20 @@ class PlayerPanel(QFrame):
             f"stop:0 #16162a, stop:1 #0e0e1a);"
             f" border-radius:12px; font-size:40px; color:#6b6b8a;"
         )
+        # overlay label used for the 300 ms cover crossfade
+        self._art_overlay = QLabel(self._art)
+        self._art_overlay.setGeometry(0, 0, self._ART_SIZE, self._ART_SIZE)
+        self._art_overlay.setStyleSheet("background: transparent;")
+        self._art_overlay.hide()
+
         info_row.addWidget(self._art)
 
         meta = QVBoxLayout()
         meta.setSpacing(6)
         meta.addStretch()
 
-        self._title = QLabel("Nothing playing")
+        self._title = _MarqueeLabel("Nothing playing")
         self._title.setObjectName("trackTitle")
-        self._title.setWordWrap(True)
         self._title.setMaximumWidth(420)
         meta.addWidget(self._title)
 
@@ -255,22 +421,19 @@ class PlayerPanel(QFrame):
         ctrl.setSpacing(8)
         ctrl.addStretch()
 
-        self._shuffle_btn = _TransportButton("🔀", "Shuffle queue")
+        self._shuffle_btn = _TransportButton("🔀︎", "Shuffle queue")
         self._shuffle_btn.clicked.connect(self.shuffle_clicked)
         ctrl.addWidget(self._shuffle_btn)
 
-        self._prev_btn = _TransportButton("⏮", "Previous")
+        self._prev_btn = _TransportButton("⏮︎", "Previous")
         self._prev_btn.clicked.connect(self.previous_clicked)
         ctrl.addWidget(self._prev_btn)
 
-        self._play_btn = QPushButton("▶")
-        self._play_btn.setObjectName("playBtn")
-        self._play_btn.setFixedSize(48, 48)
-        self._play_btn.setToolTip("Play / Pause")
+        self._play_btn = _PlayButton()
         self._play_btn.clicked.connect(self.play_pause_clicked)
         ctrl.addWidget(self._play_btn)
 
-        self._skip_btn = _TransportButton("⏭", "Skip")
+        self._skip_btn = _TransportButton("⏭︎", "Skip")
         self._skip_btn.clicked.connect(self.skip_clicked)
         ctrl.addWidget(self._skip_btn)
 
@@ -280,7 +443,7 @@ class PlayerPanel(QFrame):
 
         ctrl.addStretch()
 
-        vol_icon = QLabel("🔊")
+        vol_icon = QLabel("🔊︎")
         vol_icon.setStyleSheet("background:transparent; font-size:15px;")
         ctrl.addWidget(vol_icon)
 
@@ -368,6 +531,8 @@ class PlayerPanel(QFrame):
         self._tick_timer.stop()
 
     def _set_placeholder_art(self) -> None:
+        self._cancel_art_fade()
+        self._clear_bg_art()
         self._art.clear()
         self._art.setText("♪")
         self._art.setStyleSheet(
@@ -375,6 +540,156 @@ class PlayerPanel(QFrame):
             f"stop:0 #16162a, stop:1 #0e0e1a);"
             f" border-radius:12px; font-size:40px; color:#6b6b8a;"
         )
+
+    # ── cover crossfade ───────────────────────────────────────────────────
+
+    def _show_art(self, px: QPixmap) -> None:
+        """Crossfade the new cover over the current one (300 ms)."""
+        self._finish_art_fade()
+        self._pending_art = px
+        self._art_overlay.setPixmap(px)
+        effect = QGraphicsOpacityEffect(self._art_overlay)
+        effect.setOpacity(0.0)
+        self._art_overlay.setGraphicsEffect(effect)
+        self._art_overlay.show()
+
+        anim = QVariantAnimation(self._art_overlay)
+        anim.setDuration(300)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(effect.setOpacity)
+        anim.finished.connect(self._finish_art_fade)
+        self._art_anim = anim
+        anim.start()
+
+    def _finish_art_fade(self) -> None:
+        # commit the pending cover to the base label, drop the overlay
+        if self._pending_art is not None:
+            self._art.setPixmap(self._pending_art)
+            self._art.setStyleSheet("background: transparent;")
+        self._cancel_art_fade()
+
+    def _cancel_art_fade(self) -> None:
+        anim, self._art_anim = self._art_anim, None
+        if anim is not None:
+            anim.stop()
+            anim.deleteLater()
+        self._pending_art = None
+        self._art_overlay.hide()
+        self._art_overlay.setGraphicsEffect(None)
+
+    # ── blurred backdrop ──────────────────────────────────────────────────
+
+    def _set_bg_art(self, px: QPixmap) -> None:
+        """Fake-blur backdrop: heavy downscale now, smooth upscale in paint."""
+        if self._bg_anim is not None:
+            anim, self._bg_anim = self._bg_anim, None
+            anim.stop()
+            anim.deleteLater()
+            self._bg_old_small = None    # commit the interrupted fade
+            self._bg_old_cache = None
+            self._bg_fade = 1.0
+        self._bg_old_small = self._bg_small
+        self._bg_old_cache = self._bg_cache
+        self._bg_small = px.scaled(
+            QSize(24, 24),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._bg_cache = None
+        self._bg_fade = 0.0
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(300)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(self._on_bg_fade)
+        anim.finished.connect(self._end_bg_fade)
+        self._bg_anim = anim
+        anim.start()
+
+    def _on_bg_fade(self, v) -> None:
+        self._bg_fade = float(v)
+        self.update()
+
+    def _end_bg_fade(self) -> None:
+        if self._bg_anim is None:
+            return
+        self._bg_anim.deleteLater()
+        self._bg_anim = None
+        self._bg_fade = 1.0
+        self._bg_old_small = None
+        self._bg_old_cache = None
+        self.update()
+
+    def _clear_bg_art(self) -> None:
+        if self._bg_anim is not None:
+            anim, self._bg_anim = self._bg_anim, None
+            anim.stop()
+            anim.deleteLater()
+        self._bg_small = None
+        self._bg_old_small = None
+        self._bg_cache = None
+        self._bg_old_cache = None
+        self._bg_fade = 1.0
+        self.update()
+
+    # ── painting ──────────────────────────────────────────────────────────
+
+    def paintEvent(self, event) -> None:
+        if self._bg_small is None and self._bg_old_small is None:
+            super().paintEvent(event)    # stylesheet card (no art)
+            return
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect, 16.0, 16.0)
+        p.setClipPath(path)
+
+        p.fillRect(self.rect(), QColor(14, 14, 26, 224))   # base surface
+
+        first = self._bg_old_small is None   # fading in over the plain card
+        if self._bg_old_small is not None:
+            self._bg_old_cache = self._draw_cover(
+                p, self._bg_old_small, self._bg_old_cache, 1.0)
+        if self._bg_small is not None:
+            self._bg_cache = self._draw_cover(
+                p, self._bg_small, self._bg_cache, self._bg_fade)
+
+        alpha = int(204 * self._bg_fade) if first else 204  # 80% dark overlay
+        p.fillRect(self.rect(), QColor(6, 6, 12, alpha))
+
+        p.setClipping(False)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QColor("#2a2a40"))
+        p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 16.0, 16.0)
+        p.end()
+
+    def _draw_cover(self, p: QPainter, small: QPixmap,
+                    cache: QPixmap | None, opacity: float) -> QPixmap:
+        """Draw `small` scaled to cover the card; returns the (re)built cache."""
+        if cache is None:
+            cache = small.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        x = (self.width()  - cache.width())  // 2
+        y = (self.height() - cache.height()) // 2
+        if opacity < 1.0:
+            p.setOpacity(opacity)
+        p.drawPixmap(x, y, cache)
+        p.setOpacity(1.0)
+        return cache
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._bg_cache = None
+        self._bg_old_cache = None
 
     def _set_loop_mode(self, mode: str) -> None:
         if mode not in _LOOP_ICONS or mode == self._loop_mode:
@@ -437,6 +752,7 @@ class PlayerPanel(QFrame):
         data = reply.readAll()
         px = QPixmap()
         if px.loadFromData(data):
+            self._set_bg_art(px)             # blurred card backdrop
             s = self._ART_SIZE
             px = px.scaled(s, s,
                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -445,8 +761,7 @@ class PlayerPanel(QFrame):
             y = (px.height() - s) // 2
             px = px.copy(x, y, s, s)
             px = _rounded_pixmap(px, r=12)
-            self._art.setPixmap(px)
-            self._art.setStyleSheet("background:transparent;")
+            self._show_art(px)               # 300 ms crossfade
         reply.deleteLater()
 
 
@@ -456,3 +771,86 @@ class _TransportButton(QPushButton):
         self.setObjectName("transportBtn")
         self.setFixedSize(40, 40)
         self.setToolTip(tip)
+
+
+class _PlayButton(QPushButton):
+    """Round accent play/pause button: glow + hover scale, painted manually.
+
+    Fixed 56x56 widget with a 48px circle inside — hover growth happens in
+    paint (never in layout), so nothing around it moves.
+    """
+
+    _CIRCLE = 48
+
+    def __init__(self, parent=None) -> None:
+        super().__init__("▶", parent)
+        self.setObjectName("playBtn")
+        self.setFixedSize(56, 56)
+        self.setToolTip("Play / Pause")
+
+        self._scale = 1.0
+        self._scale_anim = QVariantAnimation(self)
+        self._scale_anim.setDuration(150)
+        self._scale_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scale_anim.valueChanged.connect(self._on_scale)
+
+        self._glow = glow(self, blur=22)
+        self._glow_anim = QPropertyAnimation(self._glow, b"blurRadius", self)
+        self._glow_anim.setDuration(150)
+        self._glow_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _on_scale(self, v) -> None:
+        self._scale = float(v)
+        self.update()
+
+    def _animate_hover(self, scale_to: float, blur_to: float) -> None:
+        self._scale_anim.stop()
+        self._scale_anim.setStartValue(self._scale)
+        self._scale_anim.setEndValue(scale_to)
+        self._scale_anim.start()
+        self._glow_anim.stop()
+        self._glow_anim.setStartValue(self._glow.blurRadius())
+        self._glow_anim.setEndValue(blur_to)
+        self._glow_anim.start()
+
+    def enterEvent(self, ev) -> None:
+        super().enterEvent(ev)
+        self._animate_hover(1.07, 36.0)
+
+    def leaveEvent(self, ev) -> None:
+        super().leaveEvent(ev)
+        self._animate_hover(1.0, 22.0)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        d = self._CIRCLE * self._scale
+        cx, cy = self.width() / 2, self.height() / 2
+        r = QRectF(cx - d / 2, cy - d / 2, d, d)
+
+        if self.isDown():
+            brush = QBrush(QColor("#5b53e6"))
+        else:
+            grad = QLinearGradient(r.topLeft(), r.bottomRight())
+            if self.underMouse():
+                grad.setColorAt(0.0, QColor("#8b85ff"))
+                grad.setColorAt(1.0, QColor("#b9a8ff"))
+            else:
+                grad.setColorAt(0.0, QColor("#6C63FF"))
+                grad.setColorAt(1.0, QColor("#A78BFA"))
+            brush = QBrush(grad)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(brush)
+        p.drawEllipse(r)
+
+        f = QFont(self.font())
+        f.setPixelSize(round(18 * self._scale))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        tr = QRectF(self.rect())
+        if self.text() == "▶":
+            tr.translate(2.0, 0.0)   # optical centering for the triangle
+        p.drawText(tr, Qt.AlignmentFlag.AlignCenter, self.text())
+        p.end()

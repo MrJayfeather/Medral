@@ -1,10 +1,15 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QAbstractItemView,
-    QPushButton, QMenu, QSizePolicy,
+    QPushButton, QMenu, QSizePolicy, QGraphicsOpacityEffect,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QSize, QPoint
+from PyQt6.QtCore import (
+    pyqtSignal, Qt, QSize, QPoint,
+    QEasingCurve, QPropertyAnimation, QVariantAnimation,
+)
 from PyQt6.QtGui import QAction
+
+from ui.anim import stagger
 
 
 class QueuePanel(QWidget):
@@ -50,8 +55,18 @@ class QueuePanel(QWidget):
     # ── public ────────────────────────────────────────────────────────────
 
     def update_state(self, state: dict) -> None:
-        self._tracks = list(state.get("queue", []))
+        new = list(state.get("queue", []))
+        old = self._tracks
+        # cascade only when tracks were appended — not on move/remove/replace
+        appended = len(new) > len(old) and new[:len(old)] == old
+        self._tracks = new
         self._rebuild()
+        if appended:
+            rows = [self._list.itemWidget(self._list.item(i))
+                    for i in range(len(old), len(new))]
+            rows = [w for w in rows if w is not None]
+            if rows:
+                stagger(rows, step_ms=45, ms=300, dy=0)
         n = len(self._tracks)
         self._count.setText(f"{n} track{'s' if n != 1 else ''}" if n else "")
 
@@ -123,19 +138,22 @@ class QueuePanel(QWidget):
 class _QueueRow(QWidget):
     remove_clicked = pyqtSignal(int)
 
+    _MARGIN      = 12   # resting left margin
+    _MARGIN_HOV  = 16   # hovered: content nudged 4px right
+
     def __init__(self, index: int, track: dict, parent=None) -> None:
         super().__init__(parent)
         self._idx = index
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 0, 8, 0)
-        lay.setSpacing(10)
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(self._MARGIN, 0, 8, 0)
+        self._lay.setSpacing(10)
 
         num = QLabel(str(index + 1))
         num.setFixedWidth(22)
         num.setAlignment(Qt.AlignmentFlag.AlignCenter)
         num.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
-        lay.addWidget(num)
+        self._lay.addWidget(num)
 
         info = QVBoxLayout()
         info.setSpacing(2)
@@ -154,7 +172,7 @@ class _QueueRow(QWidget):
         sub.setStyleSheet("font-size:11px; color:#6b6b8a; background:transparent;")
         info.addWidget(sub)
 
-        lay.addLayout(info, 1)
+        self._lay.addLayout(info, 1)
 
         rm = QPushButton("✕")
         rm.setFixedSize(22, 22)
@@ -164,7 +182,44 @@ class _QueueRow(QWidget):
             "QPushButton:hover { color:#f87171; background:rgba(248,113,113,0.12); }"
         )
         rm.clicked.connect(lambda: self.remove_clicked.emit(self._idx))
-        lay.addWidget(rm)
+        self._lay.addWidget(rm)
+
+        # remove button hidden until row hover (opacity fade)
+        self._rm_fx = QGraphicsOpacityEffect(rm)
+        self._rm_fx.setOpacity(0.0)
+        rm.setGraphicsEffect(self._rm_fx)
+
+        # hover animations — parented to the row, freed with it
+        self._shift = QVariantAnimation(self)
+        self._shift.setDuration(150)
+        self._shift.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._shift.valueChanged.connect(self._apply_shift)
+
+        self._rm_anim = QPropertyAnimation(self._rm_fx, b"opacity", self)
+        self._rm_anim.setDuration(150)
+        self._rm_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _apply_shift(self, v) -> None:
+        self._lay.setContentsMargins(int(v), 0, 8, 0)
+
+    def _animate_hover(self, entered: bool) -> None:
+        self._shift.stop()
+        self._shift.setStartValue(self._lay.contentsMargins().left())
+        self._shift.setEndValue(self._MARGIN_HOV if entered else self._MARGIN)
+        self._shift.start()
+
+        self._rm_anim.stop()
+        self._rm_anim.setStartValue(self._rm_fx.opacity())
+        self._rm_anim.setEndValue(1.0 if entered else 0.0)
+        self._rm_anim.start()
+
+    def enterEvent(self, ev) -> None:
+        self._animate_hover(True)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev) -> None:
+        self._animate_hover(False)
+        super().leaveEvent(ev)
 
 
 def _elide(text: str, n: int) -> str:
