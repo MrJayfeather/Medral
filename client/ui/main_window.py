@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QComboBox, QLabel, QFrame, QPushButton,
-    QGraphicsOpacityEffect,
+    QGraphicsOpacityEffect, QStackedWidget,
 )
 from PyQt6.QtCore import (
     Qt, pyqtSlot, QTimer, QPoint, QAbstractAnimation, QEasingCurve,
@@ -15,6 +15,7 @@ from ui.channel_panel      import ChannelPanel
 from ui.search_panel       import SearchPanel
 from ui.player_panel       import PlayerPanel
 from ui.queue_panel        import QueuePanel
+from ui.settings_view      import SettingsView
 
 
 def _is_playlist_url(url: str) -> bool:
@@ -105,7 +106,17 @@ class MainWindow(QMainWindow):
         vsplit.setSizes([440, 200])
 
         r_lay.addWidget(vsplit, 1)
-        root.addWidget(right, 1)
+
+        # page 0 = player UI, page 1 = embedded settings; both transparent
+        # so the aurora background stays visible behind either page
+        self._main_page = right
+        self._settings  = SettingsView()
+
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background: transparent;")
+        self._stack.addWidget(self._main_page)
+        self._stack.addWidget(self._settings)
+        root.addWidget(self._stack, 1)
 
         self.statusBar().showMessage("Connecting…")
 
@@ -149,14 +160,14 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._user_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         change_btn = QPushButton("⚙")
-        change_btn.setToolTip("Change server")
+        change_btn.setToolTip("Настройки")
         change_btn.setFixedSize(32, 32)
         change_btn.setStyleSheet(
             "QPushButton { background:#16162a; border:1px solid #2a2a40;"
             " border-radius:8px; color:#e8e8f5; font-size:15px; padding:0; }"
             "QPushButton:hover { background:#1e1e32; border-color:#6C63FF; }"
         )
-        change_btn.clicked.connect(self._on_change_server)
+        change_btn.clicked.connect(self._open_settings)
         lay.addWidget(change_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         return bar
@@ -172,6 +183,10 @@ class MainWindow(QMainWindow):
         self.client.request_error.connect(self._on_error)
         self.client.auth_required.connect(self._on_auth_required)
         self.client.auth_ok.connect(self._on_auth_ok)
+
+        self._settings.back_requested.connect(self._close_settings)
+        self._settings.connect_requested.connect(self._on_settings_connect)
+        self._settings.logout_requested.connect(self._on_settings_logout)
 
         self.ch_panel.join_requested.connect(
             lambda g, c: self.client.join(g, c)
@@ -244,7 +259,18 @@ class MainWindow(QMainWindow):
                 (i for i, g in enumerate(guilds) if int(g["id"]) == self._guild_id),
                 0,
             )
+            self._guild_combo.blockSignals(True)
             self._guild_combo.setCurrentIndex(restore_idx)
+            self._guild_combo.blockSignals(False)
+            # refresh the channel panel too — guilds_update / reconnect
+            # deliver fresh channels and voice members
+            g = guilds[restore_idx]
+            self._guild_id = int(g["id"])
+            self.ch_panel.set_guild(
+                self._guild_id,
+                g["name"],
+                g.get("voice_channels", []),
+            )
             self.client.fetch_state(self._guild_id)
 
     @pyqtSlot(int)
@@ -291,6 +317,8 @@ class MainWindow(QMainWindow):
 
     def set_username(self, name: str) -> None:
         self._user_lbl.setText(name or "")
+        if hasattr(self, "_settings"):
+            self._settings.set_username(name or "")
 
     def request_login(self) -> bool:
         if self._login_active or self._login_handler is None:
@@ -358,11 +386,11 @@ class MainWindow(QMainWindow):
         elif self._state.get("is_playing"):
             self.client.pause(self._guild_id)
 
-    def _on_change_server(self) -> None:
+    # ── settings page ─────────────────────────────────────────────────────
+
+    def _open_settings(self) -> None:
         import json
         from pathlib import Path
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit
-        from PyQt6.QtWidgets import QPushButton as _Btn
 
         from defaults import DEFAULT_HOST, DEFAULT_PORT
 
@@ -370,67 +398,53 @@ class MainWindow(QMainWindow):
         try:
             cfg = json.loads(cfg_file.read_text())
         except Exception:
-            cfg = {"host": DEFAULT_HOST, "port": DEFAULT_PORT}
-
-        LOGOUT = 2   # кастомный код результата диалога
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Change server")
-        dlg.setFixedSize(340, 210)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(24, 20, 24, 20)
-        lay.setSpacing(10)
-
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Host"))
-        host_edit = QLineEdit(cfg.get("host", DEFAULT_HOST))
-        row1.addWidget(host_edit)
-        lay.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Port"))
-        port_edit = QLineEdit(str(cfg.get("port", 8000)))
-        row2.addWidget(port_edit)
-        lay.addLayout(row2)
-
-        logout_btn = _Btn("Выйти из аккаунта")
-        logout_btn.setObjectName("disconnectBtn")
-        logout_btn.clicked.connect(lambda: dlg.done(LOGOUT))
-        lay.addWidget(logout_btn)
-
-        btns = QHBoxLayout()
-        cancel = _Btn("Cancel")
-        cancel.clicked.connect(dlg.reject)
-        ok = _Btn("Connect")
-        ok.setObjectName("primaryBtn")
-        ok.clicked.connect(dlg.accept)
-        btns.addWidget(cancel)
-        btns.addWidget(ok)
-        lay.addLayout(btns)
-
-        res = dlg.exec()
-        if res == LOGOUT:
-            self._do_logout()
-            return
-        if res != QDialog.DialogCode.Accepted:
-            return
-
-        host = host_edit.text().strip() or cfg["host"]
+            cfg = {}
+        host = cfg.get("host", DEFAULT_HOST)
         try:
-            port = int(port_edit.text().strip())
-        except ValueError:
-            port = cfg.get("port", 8000)
+            port = int(cfg.get("port", DEFAULT_PORT))
+        except (TypeError, ValueError):
+            port = DEFAULT_PORT
 
+        self._settings.set_values(host, port)
+        self._settings.set_username(self._user_lbl.text())
+        if self._stack.currentWidget() is not self._settings:
+            self._stack.setCurrentWidget(self._settings)
+            anim.fade_in(self._settings, ms=250, dy=8)
+
+    def _close_settings(self) -> None:
+        if self._stack.currentWidget() is not self._main_page:
+            self._stack.setCurrentWidget(self._main_page)
+            anim.fade_in(self._main_page, ms=250, dy=8)
+
+    @pyqtSlot(str, int)
+    def _on_settings_connect(self, host: str, port: int) -> None:
+        import json
+        from pathlib import Path
+
+        cfg_file = Path.home() / ".medral" / "config.json"
+        try:
+            cfg = json.loads(cfg_file.read_text())
+        except Exception:
+            cfg = {}
         cfg["host"] = host
         cfg["port"] = port
-        cfg_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg_file.write_text(json.dumps(cfg, indent=2))
+        try:
+            cfg_file.parent.mkdir(parents=True, exist_ok=True)
+            cfg_file.write_text(json.dumps(cfg, indent=2))
+        except Exception:
+            pass
 
         self._guild_id = None
         self._guilds   = []
         self._state    = {}
         self.client.set_server(host, port)
         self.statusBar().showMessage(f"Connecting to {host}:{port}…")
+        self._close_settings()
+
+    @pyqtSlot()
+    def _on_settings_logout(self) -> None:
+        self._close_settings()
+        self._do_logout()
 
     # ── intro cascade ─────────────────────────────────────────────────────
 

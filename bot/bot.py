@@ -40,14 +40,51 @@ MEMBER_CACHE_TTL = 300  # seconds
 # set by api.py so state updates are broadcast to WebSocket clients
 _broadcast: Optional[Callable[[int, dict], Awaitable[None]]] = None
 
+# set by api.py — called (sync, from the bot's event loop) whenever any user
+# changes voice channel; api.py debounces and broadcasts a guilds_update
+_voice_topology_changed: Optional[Callable[[], None]] = None
+
 
 def set_broadcast_callback(cb: Callable[[int, dict], Awaitable[None]]) -> None:
     global _broadcast
     _broadcast = cb
 
 
+def set_voice_topology_callback(cb: Callable[[], None]) -> None:
+    global _voice_topology_changed
+    _voice_topology_changed = cb
+
+
 def get_all_players() -> Dict[int, MusicPlayer]:
     return _players
+
+
+def _channel_members(guild: discord.Guild, channel: discord.VoiceChannel) -> list[dict]:
+    """Human members currently sitting in a voice channel.
+
+    Primary source is channel.members (voice states joined with the member
+    cache). Right after a restart the member cache may be cold, so fall back
+    to the raw per-guild voice states and resolve names via the cache only —
+    never fetch per user (that would block the event loop). Users whose name
+    can't be resolved are skipped.
+    """
+    members = [
+        {"id": str(m.id), "name": m.display_name}
+        for m in channel.members
+        if not m.bot
+    ]
+    if members:
+        return members
+    # Fallback: _voice_states is private but stable across py-cord releases
+    result: list[dict] = []
+    for user_id, vs in getattr(guild, "_voice_states", {}).items():
+        if vs.channel is None or vs.channel.id != channel.id:
+            continue
+        m = guild.get_member(user_id)
+        if m is None or m.bot:
+            continue
+        result.append({"id": str(m.id), "name": m.display_name})
+    return result
 
 
 def get_guilds() -> list[dict]:
@@ -57,7 +94,11 @@ def get_guilds() -> list[dict]:
             "name": g.name,
             "icon": str(g.icon) if g.icon else None,
             "voice_channels": [
-                {"id": str(vc.id), "name": vc.name}
+                {
+                    "id": str(vc.id),
+                    "name": vc.name,
+                    "members": _channel_members(g, vc),
+                }
                 for vc in g.voice_channels
             ],
         }
@@ -242,6 +283,12 @@ async def on_voice_state_update(
     before: discord.VoiceState,
     after: discord.VoiceState,
 ) -> None:
+    # Voice topology changed (someone joined/left/moved a channel) —
+    # let api.py broadcast a debounced guilds_update to WS clients.
+    # Mute/deafen toggles keep before.channel == after.channel and are ignored.
+    if before.channel != after.channel and _voice_topology_changed is not None:
+        _voice_topology_changed()
+
     if member != bot.user:
         # Humans joining/leaving affect the alone-in-channel condition
         if member.guild.id in _players:

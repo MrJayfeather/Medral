@@ -119,6 +119,12 @@ class ApiClient(QObject):
                         msg_type = data.get("type")
                         if msg_type == "state_update":
                             self.state_updated.emit(data)
+                        elif msg_type == "guilds_update":
+                            # voice members changed — reuse the existing
+                            # guilds_updated path to refresh the UI
+                            guilds = data.get("guilds")
+                            if isinstance(guilds, list):
+                                self.guilds_updated.emit(guilds)
                         # "ping" messages from server are ignored (keepalive only)
             except websockets.exceptions.ConnectionClosed as e:
                 rcvd = getattr(e, "rcvd", None)

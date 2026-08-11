@@ -90,6 +90,26 @@ class ConnectionManager:
         for ws in dead:
             self._connections.pop(ws, None)
 
+    async def send_guilds_update(self, guilds: list[dict]) -> None:
+        """Push {"type": "guilds_update"} to every connection, each payload
+        filtered down to the guilds that connection is allowed to see."""
+        if not self._connections:
+            return
+        dead: list[WebSocket] = []
+        # Iterate over a copy — connect/disconnect may mutate the dict while
+        # we await inside the loop.
+        for ws, allowed in list(self._connections.items()):
+            filtered = [g for g in guilds if g["id"] in allowed]
+            payload = json.dumps(
+                {"type": "guilds_update", "guilds": filtered}, ensure_ascii=False
+            )
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._connections.pop(ws, None)
+
     @property
     def count(self) -> int:
         return len(self._connections)
@@ -100,6 +120,33 @@ manager = ConnectionManager()
 
 async def _broadcast_state(guild_id: int, state: dict) -> None:
     await manager.broadcast({"type": "state_update", **state})
+
+
+# ------------------------------------------------------------------ guilds_update debounce
+
+GUILDS_UPDATE_DEBOUNCE = 1.0  # seconds
+
+# pending debounced guilds_update broadcast (cancelled by each new event)
+_guilds_update_task: Optional[asyncio.Task] = None
+
+
+async def _debounced_guilds_update() -> None:
+    try:
+        await asyncio.sleep(GUILDS_UPDATE_DEBOUNCE)
+    except asyncio.CancelledError:
+        return
+    await manager.send_guilds_update(music_bot.get_guilds())
+
+
+def _on_voice_topology_changed() -> None:
+    """Sync callback from bot.on_voice_state_update — restarts the debounce."""
+    global _guilds_update_task
+    old = _guilds_update_task
+    if old is not None and not old.done():
+        old.cancel()
+    _guilds_update_task = asyncio.get_running_loop().create_task(
+        _debounced_guilds_update()
+    )
 
 
 # ------------------------------------------------------------------ auth: sessions & OAuth state
@@ -242,6 +289,7 @@ async def lifespan(app: FastAPI):
 
     _load_sessions()
     music_bot.set_broadcast_callback(_broadcast_state)
+    music_bot.set_voice_topology_callback(_on_voice_topology_changed)
     bot_task        = asyncio.create_task(music_bot.bot.start(TOKEN))
     keepalive_task  = asyncio.create_task(_keepalive_loop())
     print(f"[api] HTTP server running on {API_HOST}:{API_PORT}")
@@ -251,6 +299,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         keepalive_task.cancel()
+        if _guilds_update_task is not None and not _guilds_update_task.done():
+            _guilds_update_task.cancel()
         bot_task.cancel()
         if not music_bot.bot.is_closed():
             await music_bot.bot.close()

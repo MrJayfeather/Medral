@@ -5,11 +5,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     pyqtSignal, Qt, QAbstractAnimation, QEasingCurve, QEvent,
-    QPropertyAnimation, QRectF, QVariantAnimation,
+    QPointF, QPropertyAnimation, QRectF, QVariantAnimation,
 )
 from PyQt6.QtGui import QFont, QColor, QLinearGradient, QPainter
 
 _ACTIVE_ROLE = Qt.ItemDataRole.UserRole + 1   # bot connected to this channel
+_MEMBER_ROLE = Qt.ItemDataRole.UserRole + 2   # row is a channel member (non-interactive)
 
 
 class ChannelPanel(QFrame):
@@ -96,7 +97,10 @@ class ChannelPanel(QFrame):
         self._guild_id = guild_id
         self._channels = channels
         self._server_label.setText(name.upper()[:22])
-        self._rebuild_list()
+        # guilds_update pushes fresh lists on every voice event — rebuild
+        # only when channels / members / active state actually changed
+        if self._snapshot() != self._rendered:
+            self._rebuild_list()
         self._action_btn.setEnabled(True)
 
     def update_state(self, state: dict) -> None:
@@ -115,7 +119,10 @@ class ChannelPanel(QFrame):
             et = ev.type()
             if et in (QEvent.Type.MouseMove, QEvent.Type.HoverMove):
                 idx = self._list.indexAt(ev.position().toPoint())
-                self._delegate.set_hovered(idx.row() if idx.isValid() else -1)
+                row = idx.row() if idx.isValid() else -1
+                if row >= 0 and bool(idx.data(_MEMBER_ROLE)):
+                    row = -1   # member rows have no hover state
+                self._delegate.set_hovered(row)
             elif et in (QEvent.Type.Leave, QEvent.Type.HoverLeave):
                 self._delegate.set_hovered(-1)
         return super().eventFilter(obj, ev)
@@ -123,8 +130,20 @@ class ChannelPanel(QFrame):
     # ── private ───────────────────────────────────────────────────────────
 
     def _snapshot(self) -> tuple:
+        # members are part of the snapshot so guilds_update-driven rebuilds
+        # fire when someone joins/leaves a channel, not only on renames
         return (
-            tuple((str(ch["id"]), ch["name"]) for ch in self._channels),
+            tuple(
+                (
+                    str(ch["id"]),
+                    ch["name"],
+                    tuple(
+                        (str(m.get("id", "")), m.get("name", ""))
+                        for m in ch.get("members", [])
+                    ),
+                )
+                for ch in self._channels
+            ),
             self._connected_ch_id,
         )
 
@@ -146,6 +165,18 @@ class ChannelPanel(QFrame):
             self._list.addItem(item)
             if selected_id is not None and str(ch["id"]) == selected_id:
                 self._list.setCurrentItem(item)
+            # member rows: indented, muted, non-selectable; UserRole stays
+            # None so click/double-click handlers skip them
+            for m in ch.get("members", []):
+                name = m.get("name")
+                if not name:
+                    continue
+                m_item = QListWidgetItem(f"        {name}")
+                m_item.setData(_MEMBER_ROLE, True)
+                m_item.setFlags(m_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                m_item.setForeground(QColor("#6b6b8a"))
+                m_item.setFont(_member_font())
+                self._list.addItem(m_item)
         self._rendered = self._snapshot()
 
     def _refresh_btn(self) -> None:
@@ -188,11 +219,16 @@ class ChannelPanel(QFrame):
             self.leave_requested.emit(self._guild_id)
             return
         item = self._list.currentItem()
-        if item:
-            self.join_requested.emit(
-                self._guild_id,
-                int(item.data(Qt.ItemDataRole.UserRole)),
-            )
+        cid = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if cid is None:
+            # a click on a member row may move currentItem off the channel;
+            # fall back to the still-highlighted selection
+            for it in self._list.selectedItems():
+                cid = it.data(Qt.ItemDataRole.UserRole)
+                if cid is not None:
+                    break
+        if cid is not None:
+            self.join_requested.emit(self._guild_id, int(cid))
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         pass
@@ -200,10 +236,10 @@ class ChannelPanel(QFrame):
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         if self._guild_id is None:
             return
-        self.join_requested.emit(
-            self._guild_id,
-            int(item.data(Qt.ItemDataRole.UserRole)),
-        )
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        if cid is None:
+            return   # member rows carry no channel id
+        self.join_requested.emit(self._guild_id, int(cid))
 
 
 # ── delegate ──────────────────────────────────────────────────────────────
@@ -258,6 +294,21 @@ class _ChannelDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:
         r = QRectF(option.rect.adjusted(4, 1, -4, -1))
+
+        if bool(index.data(_MEMBER_ROLE)):
+            # member row: no hover/selection chrome, just an accent bullet
+            # (60% alpha) to the left of the indented name
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            dot = QColor(0x6C, 0x63, 0xFF)
+            dot.setAlphaF(0.6)
+            painter.setBrush(dot)
+            painter.drawEllipse(QPointF(r.left() + 16.0, r.center().y()), 2.0, 2.0)
+            painter.restore()
+            super().paint(painter, option, index)
+            return
+
         t = self._progress.get(index.row(), 0.0)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         active   = bool(index.data(_ACTIVE_ROLE))
@@ -300,4 +351,10 @@ class _Divider(QFrame):
 def _bold_font() -> QFont:
     f = QFont()
     f.setBold(True)
+    return f
+
+
+def _member_font() -> QFont:
+    f = QFont()
+    f.setPixelSize(11)
     return f

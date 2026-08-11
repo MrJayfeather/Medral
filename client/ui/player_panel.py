@@ -12,7 +12,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPixmap, QPainter, QPainterPath, QColor, QLinearGradient, QRadialGradient,
-    QBrush, QFont,
+    QBrush, QFont, QPen,
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -75,14 +75,7 @@ def _rounded_pixmap(px: QPixmap, r: int = 12) -> QPixmap:
 
 
 _LOOP_ORDER = ["none", "all", "one"]        # click cycle: none → all → one → none
-_LOOP_ICONS = {"none": "🔁︎", "all": "🔁︎", "one": "🔂︎"}
 _LOOP_TIPS  = {"none": "Loop: off", "all": "Loop: queue", "one": "Loop: track"}
-_LOOP_ACTIVE_QSS = (
-    "QPushButton { color:#6C63FF; background-color:rgba(108,99,255,0.18);"
-    " border:none; border-radius:20px; font-size:18px; }"
-    "QPushButton:hover { background-color:rgba(108,99,255,0.30); }"
-    "QPushButton:pressed { background-color:rgba(108,99,255,0.40); }"
-)
 
 
 class _MarqueeLabel(QLabel):
@@ -421,11 +414,11 @@ class PlayerPanel(QFrame):
         ctrl.setSpacing(8)
         ctrl.addStretch()
 
-        self._shuffle_btn = _TransportButton("🔀︎", "Shuffle queue")
+        self._shuffle_btn = _IconButton("shuffle", "Shuffle queue")
         self._shuffle_btn.clicked.connect(self.shuffle_clicked)
         ctrl.addWidget(self._shuffle_btn)
 
-        self._prev_btn = _TransportButton("⏮︎", "Previous")
+        self._prev_btn = _IconButton("previous", "Previous")
         self._prev_btn.clicked.connect(self.previous_clicked)
         ctrl.addWidget(self._prev_btn)
 
@@ -433,18 +426,17 @@ class PlayerPanel(QFrame):
         self._play_btn.clicked.connect(self.play_pause_clicked)
         ctrl.addWidget(self._play_btn)
 
-        self._skip_btn = _TransportButton("⏭︎", "Skip")
+        self._skip_btn = _IconButton("next", "Skip")
         self._skip_btn.clicked.connect(self.skip_clicked)
         ctrl.addWidget(self._skip_btn)
 
-        self._loop_btn = _TransportButton(_LOOP_ICONS["none"], _LOOP_TIPS["none"])
+        self._loop_btn = _IconButton("loop", _LOOP_TIPS["none"], idle_muted=True)
         self._loop_btn.clicked.connect(self._on_loop_click)
         ctrl.addWidget(self._loop_btn)
 
         ctrl.addStretch()
 
-        vol_icon = QLabel("🔊︎")
-        vol_icon.setStyleSheet("background:transparent; font-size:15px;")
+        vol_icon = _VolumeIcon()
         ctrl.addWidget(vol_icon)
 
         self._vol = QSlider(Qt.Orientation.Horizontal)
@@ -692,13 +684,11 @@ class PlayerPanel(QFrame):
         self._bg_old_cache = None
 
     def _set_loop_mode(self, mode: str) -> None:
-        if mode not in _LOOP_ICONS or mode == self._loop_mode:
+        if mode not in _LOOP_TIPS or mode == self._loop_mode:
             return
         self._loop_mode = mode
-        self._loop_btn.setText(_LOOP_ICONS[mode])
+        self._loop_btn.set_mode(mode)    # loop/loop_one glyph + accent state
         self._loop_btn.setToolTip(_LOOP_TIPS[mode])
-        # active modes glow purple; "none" falls back to the app stylesheet
-        self._loop_btn.setStyleSheet(_LOOP_ACTIVE_QSS if mode != "none" else "")
 
     def _on_loop_click(self) -> None:
         nxt = _LOOP_ORDER[(_LOOP_ORDER.index(self._loop_mode) + 1) % len(_LOOP_ORDER)]
@@ -765,12 +755,266 @@ class PlayerPanel(QFrame):
         reply.deleteLater()
 
 
-class _TransportButton(QPushButton):
-    def __init__(self, icon: str, tip: str, parent=None) -> None:
-        super().__init__(icon, parent)
-        self.setObjectName("transportBtn")
+class _IconButton(QPushButton):
+    """Flat 40x40 transport button with a hand-drawn vector glyph.
+
+    Everything is painted manually with QPainterPaths inside a 20x20 design
+    box centered in the widget:
+    - hover: accent-tinted backdrop fades in and the glyph lightens to
+      #A78BFA (single QVariantAnimation, 150 ms OutCubic)
+    - pressed: glyph shrinks to 0.9 (paint-only, layout untouched)
+    - active (loop/shuffle toggles): accent glyph on rgba(108,99,255,0.18)
+    Icon names: shuffle | previous | next | loop | loop_one | volume.
+    """
+
+    _IDLE   = QColor("#e8e8f5")
+    _MUTED  = QColor("#6b6b8a")
+    _HOVER  = QColor("#A78BFA")
+    _ACCENT = QColor("#6C63FF")
+
+    def __init__(self, icon: str, tip: str = "",
+                 idle_muted: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self._icon       = icon
+        self._idle_muted = idle_muted
+        self._active     = False
+        self._hover      = 0.0            # animated 0..1 hover progress
         self.setFixedSize(40, 40)
-        self.setToolTip(tip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tip:
+            self.setToolTip(tip)
+
+        self._hover_anim = QVariantAnimation(self)
+        self._hover_anim.setDuration(150)
+        self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._hover_anim.valueChanged.connect(self._on_hover)
+
+    # ── public ────────────────────────────────────────────────────────────
+
+    def set_icon(self, icon: str) -> None:
+        if icon != self._icon:
+            self._icon = icon
+            self.update()
+
+    def set_active(self, active: bool) -> None:
+        if active != self._active:
+            self._active = active
+            self.update()
+
+    def set_mode(self, mode: str) -> None:
+        """Loop-button helper: mode "none" | "all" | "one"."""
+        self.set_icon("loop_one" if mode == "one" else "loop")
+        self.set_active(mode != "none")
+
+    # ── hover animation ───────────────────────────────────────────────────
+
+    def _on_hover(self, v) -> None:
+        self._hover = float(v)
+        self.update()
+
+    def _animate_hover(self, to: float) -> None:
+        self._hover_anim.stop()
+        self._hover_anim.setStartValue(self._hover)
+        self._hover_anim.setEndValue(to)
+        self._hover_anim.start()
+
+    def enterEvent(self, ev) -> None:
+        super().enterEvent(ev)
+        self._animate_hover(1.0)
+
+    def leaveEvent(self, ev) -> None:
+        super().leaveEvent(ev)
+        self._animate_hover(0.0)
+
+    # ── painting ──────────────────────────────────────────────────────────
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # backdrop: active tint + animated hover highlight
+        if self._active:
+            bg_alpha = 46 + int(20 * self._hover)   # 0.18 → ~0.26
+        else:
+            bg_alpha = int(38 * self._hover)        # 0 → 0.15
+        if bg_alpha > 0:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(108, 99, 255, bg_alpha))
+            p.drawRoundedRect(QRectF(self.rect()), 20.0, 20.0)
+
+        base = self._ACCENT if self._active else (
+            self._MUTED if self._idle_muted else self._IDLE)
+        color = self._mix(base, self._HOVER, self._hover)
+
+        # pressed: shrink the glyph around the center (paint-only)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        p.translate(cx, cy)
+        if self.isDown():
+            p.scale(0.9, 0.9)
+        p.translate(-10.0, -10.0)        # into the 20x20 icon box
+
+        getattr(self, "_draw_" + self._icon)(p, color)
+        p.end()
+
+    @staticmethod
+    def _mix(c1: QColor, c2: QColor, t: float) -> QColor:
+        return QColor(
+            round(c1.red()   + (c2.red()   - c1.red())   * t),
+            round(c1.green() + (c2.green() - c1.green()) * t),
+            round(c1.blue()  + (c2.blue()  - c1.blue())  * t),
+        )
+
+    # ── glyphs (20x20 design box) ─────────────────────────────────────────
+
+    @staticmethod
+    def _stroke(color: QColor, width: float = 1.8) -> QPen:
+        return QPen(color, width, Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+
+    @staticmethod
+    def _soft_fill(p: QPainter, color: QColor, path: QPainterPath,
+                   pen_w: float = 1.4) -> None:
+        """Fill a path and outline it with a round-join pen of the same
+        color — cheap corner rounding for triangles/arrowheads."""
+        p.setPen(_IconButton._stroke(color, pen_w))
+        p.setBrush(QBrush(color))
+        p.drawPath(path)
+
+    @staticmethod
+    def _add_arrow(path: QPainterPath, x: float, y: float,
+                   angle: float, size: float = 2.5) -> None:
+        """Append a triangular head centered at (x, y) pointing along
+        `angle` (radians, screen coords: +x right, +y down)."""
+        dx, dy = math.cos(angle), math.sin(angle)
+        px, py = -dy, dx
+        path.moveTo(x + dx * size, y + dy * size)
+        path.lineTo(x - dx * size * 0.55 + px * size * 0.95,
+                    y - dy * size * 0.55 + py * size * 0.95)
+        path.lineTo(x - dx * size * 0.55 - px * size * 0.95,
+                    y - dy * size * 0.55 - py * size * 0.95)
+        path.closeSubpath()
+
+    @staticmethod
+    def _draw_shuffle(p: QPainter, color: QColor) -> None:
+        # two crossing strands, arrowheads on the right ends
+        lines = QPainterPath()
+        lines.moveTo(1.8, 14.8)
+        lines.lineTo(5.2, 14.8)
+        lines.lineTo(12.6, 5.2)
+        lines.lineTo(15.6, 5.2)
+        lines.moveTo(1.8, 5.2)
+        lines.lineTo(5.2, 5.2)
+        lines.lineTo(12.6, 14.8)
+        lines.lineTo(15.6, 14.8)
+        p.setPen(_IconButton._stroke(color))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(lines)
+
+        heads = QPainterPath()
+        _IconButton._add_arrow(heads, 16.4, 5.2, 0.0)
+        _IconButton._add_arrow(heads, 16.4, 14.8, 0.0)
+        _IconButton._soft_fill(p, color, heads, pen_w=1.0)
+
+    @staticmethod
+    def _draw_previous(p: QPainter, color: QColor) -> None:
+        # bar + two left-pointing triangles
+        glyph = QPainterPath()
+        glyph.addRoundedRect(QRectF(2.2, 4.8, 2.2, 10.4), 1.1, 1.1)
+        for apex, base in ((5.6, 12.0), (11.8, 18.2)):
+            glyph.moveTo(apex, 10.0)
+            glyph.lineTo(base, 5.0)
+            glyph.lineTo(base, 15.0)
+            glyph.closeSubpath()
+        _IconButton._soft_fill(p, color, glyph)
+
+    @staticmethod
+    def _draw_next(p: QPainter, color: QColor) -> None:
+        p.save()
+        p.translate(20.0, 0.0)
+        p.scale(-1.0, 1.0)
+        _IconButton._draw_previous(p, color)
+        p.restore()
+
+    @staticmethod
+    def _draw_loop(p: QPainter, color: QColor) -> None:
+        # two clockwise arcs with tangential arrowheads
+        r = 6.4
+        ring = QRectF(10.0 - r, 10.0 - r, 2 * r, 2 * r)
+        arcs = QPainterPath()
+        arcs.arcMoveTo(ring, 150.0)
+        arcs.arcTo(ring, 150.0, -120.0)      # top arc, ends at 30 deg
+        arcs.arcMoveTo(ring, -30.0)
+        arcs.arcTo(ring, -30.0, -120.0)      # bottom arc, ends at 210 deg
+        p.setPen(_IconButton._stroke(color))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(arcs)
+
+        heads = QPainterPath()
+        for end_deg in (30.0, 210.0):
+            t = math.radians(end_deg)
+            x = 10.0 + r * math.cos(t)
+            y = 10.0 - r * math.sin(t)
+            # clockwise tangent in screen coords: (sin t, cos t)
+            ang = math.atan2(math.cos(t), math.sin(t))
+            _IconButton._add_arrow(heads, x, y, ang, 2.4)
+        _IconButton._soft_fill(p, color, heads, pen_w=1.0)
+
+    @staticmethod
+    def _draw_loop_one(p: QPainter, color: QColor) -> None:
+        _IconButton._draw_loop(p, color)
+        f = QFont()
+        f.setFamilies(["DM Sans", "Segoe UI"])   # bundled font, OS fallback
+        f.setPixelSize(8)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QPen(color))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawText(QRectF(0.0, 0.0, 20.0, 20.0),
+                   Qt.AlignmentFlag.AlignCenter, "1")
+
+    @staticmethod
+    def _draw_volume(p: QPainter, color: QColor) -> None:
+        # speaker body + two sound arcs
+        body = QPainterPath()
+        body.moveTo(2.2, 7.6)
+        body.lineTo(5.4, 7.6)
+        body.lineTo(9.2, 4.0)
+        body.lineTo(9.2, 16.0)
+        body.lineTo(5.4, 12.4)
+        body.lineTo(2.2, 12.4)
+        body.closeSubpath()
+        _IconButton._soft_fill(p, color, body)
+
+        waves = QPainterPath()
+        for wr in (3.2, 5.6):
+            wave = QRectF(9.5 - wr, 10.0 - wr, 2 * wr, 2 * wr)
+            waves.arcMoveTo(wave, 45.0)
+            waves.arcTo(wave, 45.0, -90.0)
+        p.setPen(_IconButton._stroke(color))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(waves)
+
+
+class _VolumeIcon(QWidget):
+    """Static speaker glyph next to the volume slider (no interaction).
+
+    Reuses the _IconButton vector path at 80% scale so the transport row
+    keeps a single visual language.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(28, 28)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(self.width() / 2.0, self.height() / 2.0)
+        p.scale(0.8, 0.8)
+        p.translate(-10.0, -10.0)
+        _IconButton._draw_volume(p, QColor("#e8e8f5"))
+        p.end()
 
 
 class _PlayButton(QPushButton):
@@ -844,13 +1088,30 @@ class _PlayButton(QPushButton):
         p.setBrush(brush)
         p.drawEllipse(r)
 
-        f = QFont(self.font())
-        f.setPixelSize(round(18 * self._scale))
-        f.setBold(True)
-        p.setFont(f)
-        p.setPen(QColor("#ffffff"))
-        tr = QRectF(self.rect())
+        # glyph drawn as vector paths, same language as _IconButton:
+        # play — triangle with rounded corners, pause — two rounded bars
+        s = self._scale
+        white = QColor("#ffffff")
+        glyph = QPainterPath()
         if self.text() == "▶":
-            tr.translate(2.0, 0.0)   # optical centering for the triangle
-        p.drawText(tr, Qt.AlignmentFlag.AlignCenter, self.text())
+            hw, hh = 6.4 * s, 7.6 * s        # half-extents of the triangle
+            ox = 1.6 * s                     # optical centering
+            glyph.moveTo(cx - hw + ox, cy - hh)
+            glyph.lineTo(cx - hw + ox, cy + hh)
+            glyph.lineTo(cx + hw + ox, cy)
+            glyph.closeSubpath()
+            # round-join outline of the same color rounds the corners
+            p.setPen(QPen(white, 3.0 * s, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        else:
+            bw, bh, gap = 4.4 * s, 15.0 * s, 3.8 * s
+            glyph.addRoundedRect(
+                QRectF(cx - gap / 2 - bw, cy - bh / 2, bw, bh),
+                2.1 * s, 2.1 * s)
+            glyph.addRoundedRect(
+                QRectF(cx + gap / 2, cy - bh / 2, bw, bh),
+                2.1 * s, 2.1 * s)
+            p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(white))
+        p.drawPath(glyph)
         p.end()

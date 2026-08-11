@@ -50,10 +50,11 @@ from PyQt6.QtGui import QFont
 sys.path.insert(0, str(Path(__file__).parent))
 
 from styles          import STYLESHEET
-from defaults        import DEFAULT_HOST, DEFAULT_PORT
+from defaults        import DEFAULT_HOST, DEFAULT_PORT, SPLASH_VERSION
 from network         import ApiClient
 from ui.main_window   import MainWindow
 from ui.splash_screen import SplashScreen
+from ui.splash_screen_v2 import SplashScreenV2
 
 
 # ── version ───────────────────────────────────────────────────────────────────
@@ -621,7 +622,8 @@ def main() -> None:
     else:
         window.set_username(cfg.get("username", ""))
 
-    splash = SplashScreen()
+    splash_cls = SplashScreen if SPLASH_VERSION == "v1" else SplashScreenV2
+    splash = splash_cls()
     splash.show()
 
     def _on_splash_done() -> None:
