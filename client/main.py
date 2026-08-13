@@ -551,6 +551,24 @@ def _load_fonts() -> None:
             break
 
 
+def _play_startup_sound() -> None:
+    """Play the short startup chime (async, best-effort).
+
+    Same _MEIPASS pattern as _load_fonts: sounds/ ships next to the code in
+    dev and inside the PyInstaller exe.  Missing file or non-Windows platform
+    is silently ignored.
+    """
+    try:
+        import winsound
+        path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "sounds" / "startup.wav"
+        winsound.PlaySound(
+            str(path),
+            winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+        )
+    except Exception:
+        pass
+
+
 def _install_excepthook() -> None:
     """Log unhandled slot exceptions instead of letting PyQt6 abort the app.
 
@@ -625,6 +643,7 @@ def main() -> None:
     splash_cls = SplashScreen if SPLASH_VERSION == "v1" else SplashScreenV2
     splash = splash_cls()
     splash.show()
+    _play_startup_sound()
 
     def _on_splash_done() -> None:
         window.show()

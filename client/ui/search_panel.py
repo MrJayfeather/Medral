@@ -6,6 +6,7 @@ from PyQt6.QtCore import pyqtSignal, Qt, QEasingCurve, QRectF, QVariantAnimation
 from PyQt6.QtGui import QKeyEvent, QColor, QPainter, QPen
 
 from ui.anim import glow, stagger
+from ui.elide import ElideLabel
 
 
 class SearchPanel(QWidget):
@@ -157,14 +158,15 @@ class _ResultRow(QFrame):
         info = QVBoxLayout()
         info.setSpacing(2)
 
-        self._title = QLabel()
+        # labels shrink with the row (elided dynamically) instead of
+        # pushing the play button past the panel edge in narrow windows
+        self._title = ElideLabel()
         self._title.setStyleSheet(
             "font-size:13px; font-weight:600; color:#e8e8f5; background:transparent;"
         )
-        self._title.setMaximumWidth(500)
         info.addWidget(self._title)
 
-        self._meta = QLabel()
+        self._meta = ElideLabel()
         self._meta.setStyleSheet("font-size:11px; color:#6b6b8a; background:transparent;")
         info.addWidget(self._meta)
 
@@ -175,7 +177,8 @@ class _ResultRow(QFrame):
         btn.setFixedSize(32, 32)
         btn.setToolTip("Add to queue")
         btn.clicked.connect(lambda: self.play_clicked.emit(self._url))
-        lay.addWidget(btn)
+        # stretch 0 — the button keeps its fixed 32x32 and is never squeezed
+        lay.addWidget(btn, 0)
 
     def set_track(self, track: dict) -> None:
         self._url = track.get("webpage_url", "")
@@ -184,8 +187,7 @@ class _ResultRow(QFrame):
         dur    = int(track.get("duration") or 0)
         m, s   = divmod(dur, 60)
 
-        self._title.setText(_elide(title, 60))
-        self._title.setToolTip(title)
+        self._title.setText(title)
         self._meta.setText(f"{artist}  •  {m}:{s:02d}")
 
     # ── animated hover ────────────────────────────────────────────────────
@@ -220,7 +222,3 @@ class _ResultRow(QFrame):
         p.setPen(QPen(border, 1))
         p.setBrush(bg)
         p.drawRoundedRect(rect, 12.0, 12.0)
-
-
-def _elide(text: str, max_len: int) -> str:
-    return text if len(text) <= max_len else text[:max_len - 1] + "…"

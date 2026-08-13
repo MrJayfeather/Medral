@@ -10,6 +10,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QAction
 
 from ui.anim import stagger
+from ui.elide import ElideLabel
 
 
 class QueuePanel(QWidget):
@@ -163,12 +164,13 @@ class _QueueRow(QWidget):
         dur    = int(track.get("duration") or 0)
         m, s   = divmod(dur, 60)
 
-        t_lbl = QLabel(_elide(title, 52))
+        # labels shrink with the row (elided dynamically) instead of
+        # pushing the remove button past the panel edge in narrow windows
+        t_lbl = ElideLabel(title)
         t_lbl.setStyleSheet("font-size:13px; font-weight:500; color:#e8e8f5; background:transparent;")
-        t_lbl.setToolTip(title)
         info.addWidget(t_lbl)
 
-        sub = QLabel(f"{_elide(artist, 30)}  •  {m}:{s:02d}")
+        sub = ElideLabel(f"{artist}  •  {m}:{s:02d}")
         sub.setStyleSheet("font-size:11px; color:#6b6b8a; background:transparent;")
         info.addWidget(sub)
 
@@ -182,7 +184,8 @@ class _QueueRow(QWidget):
             "QPushButton:hover { color:#f87171; background:rgba(248,113,113,0.12); }"
         )
         rm.clicked.connect(lambda: self.remove_clicked.emit(self._idx))
-        self._lay.addWidget(rm)
+        # stretch 0 — the button keeps its fixed 22x22 and is never squeezed
+        self._lay.addWidget(rm, 0)
 
         # remove button hidden until row hover (opacity fade)
         self._rm_fx = QGraphicsOpacityEffect(rm)
@@ -220,7 +223,3 @@ class _QueueRow(QWidget):
     def leaveEvent(self, ev) -> None:
         self._animate_hover(False)
         super().leaveEvent(ev)
-
-
-def _elide(text: str, n: int) -> str:
-    return text if len(text) <= n else text[:n - 1] + "…"

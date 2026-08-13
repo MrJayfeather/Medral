@@ -20,6 +20,7 @@ a = Analysis(
         (str(ROOT / 'version.txt'),          '.'),
         (str(ROOT / 'client' / 'ui'),        'ui'),
         (str(ROOT / 'client' / 'fonts'),     'fonts'),
+        (str(ROOT / 'client' / 'sounds'),    'sounds'),
         (str(ROOT / 'client' / 'styles.py'), '.'),
         (str(ROOT / 'client' / 'network.py'),'.'),
         # yt-dlp extractors

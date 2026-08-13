@@ -179,21 +179,49 @@ class _MarqueeLabel(QLabel):
 
 
 class _EqWidget(QWidget):
-    """18-bar animated equalizer visualizer (rounded caps, soft decay)."""
+    """Continuous "living wave" visualizer (Catmull-Rom curve, ~60 FPS).
 
-    _N    = 18
-    _IDLE = 0.05
+    A smooth curve through 24 control points, same visual language as the
+    splash screen wave: random targets refresh every ~90 ms while every
+    16 ms frame only eases the heights toward them (exponential smoothing)
+    and repaints.  A slow travelling phase makes the wave breathe and
+    drift; a phase-shifted back layer adds depth, and a few glowing
+    sparks ride the crest.  On pause the wave decays to a near-flat line
+    in ~400 ms and the timer stops.
+    """
+
+    _N          = 24       # control points across the width
+    _IDLE       = 0.04     # near-flat baseline level
+    _TICK_MS    = 16       # ~60 FPS
+    _RETARGET_S = 0.09     # seconds between random target refreshes
+    _ATTACK_TAU = 0.12     # s — exp. easing toward targets while active
+    _DECAY_TAU  = 0.09     # s — pause fade-out (settles in ~400 ms)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(36)
+        self.setFixedHeight(44)
         self._active   = False
         self._decaying = False
         self._heights  = [self._IDLE] * self._N
         self._targets  = [self._IDLE] * self._N
+        self._phase    = 0.0
+        self._retarget_acc = self._RETARGET_S    # retarget on the first tick
+        self._last_t   = time.monotonic()
+        # Hann window: quiet at the edges, full amplitude in the middle
+        n1 = self._N - 1
+        self._profile = [math.sin(math.pi * i / n1) ** 2
+                         for i in range(self._N)]
+        # sparks riding the crest: [pos 0..1, drift/s, pulse phase, pulse hz]
+        self._sparks = [
+            [random.uniform(0.15, 0.85),
+             random.uniform(0.03, 0.07) * random.choice((-1.0, 1.0)),
+             random.uniform(0.0, math.tau),
+             random.uniform(1.5, 2.6)]
+            for _ in range(3)
+        ]
 
         self._timer = QTimer(self)
-        self._timer.setInterval(80)
+        self._timer.setInterval(self._TICK_MS)
         self._timer.timeout.connect(self._tick)
 
     def set_active(self, active: bool) -> None:
@@ -202,13 +230,16 @@ class _EqWidget(QWidget):
         self._active = active
         if active:
             self._decaying = False
+            self._retarget_acc = self._RETARGET_S
+            self._last_t = time.monotonic()
             if self.isVisible():
                 self._timer.start()
         else:
-            # ease bars down (~400 ms) instead of snapping to the baseline
+            # ease the wave down (~400 ms) instead of snapping flat
             self._targets = [self._IDLE] * self._N
             if self.isVisible():
                 self._decaying = True
+                self._last_t = time.monotonic()
                 self._timer.start()
             else:
                 self._snap_idle()
@@ -222,6 +253,7 @@ class _EqWidget(QWidget):
     def showEvent(self, ev) -> None:
         super().showEvent(ev)
         if self._active or self._decaying:
+            self._last_t = time.monotonic()
             self._timer.start()
 
     def hideEvent(self, ev) -> None:
@@ -230,48 +262,168 @@ class _EqWidget(QWidget):
         if self._decaying:
             self._snap_idle()    # finish the decay while invisible
 
+    # ── simulation ────────────────────────────────────────────────────────
+
     def _tick(self) -> None:
         if not self.isVisible() or _window_minimized(self):
+            self._last_t = time.monotonic()   # no dt jump on resume
             return
+        now = time.monotonic()
+        dt = min(0.05, max(0.0, now - self._last_t))
+        self._last_t = now
+
+        self._phase += dt * 1.7               # slow travelling drift
+
         if self._active:
+            self._retarget_acc += dt
+            if self._retarget_acc >= self._RETARGET_S:
+                self._retarget_acc = 0.0
+                self._retarget()
+            k = 1.0 - math.exp(-dt / self._ATTACK_TAU)
             for i in range(self._N):
-                self._targets[i] = random.uniform(0.08, 1.0)
-                self._heights[i] += (self._targets[i] - self._heights[i]) * 0.35
+                self._heights[i] += (self._targets[i] - self._heights[i]) * k
         else:
+            k = 1.0 - math.exp(-dt / self._DECAY_TAU)
             done = True
             for i in range(self._N):
-                self._heights[i] += (self._IDLE - self._heights[i]) * 0.45
-                if abs(self._heights[i] - self._IDLE) > 0.01:
+                self._heights[i] += (self._IDLE - self._heights[i]) * k
+                if abs(self._heights[i] - self._IDLE) > 0.008:
                     done = False
             if done:
                 self._snap_idle()
                 return
+
+        # sparks drift slowly along the crest, bouncing off the edges
+        for s in self._sparks:
+            s[0] += s[1] * dt
+            if s[0] < 0.10:
+                s[0], s[1] = 0.10, abs(s[1])
+            elif s[0] > 0.90:
+                s[0], s[1] = 0.90, -abs(s[1])
         self.update()
+
+    def _retarget(self) -> None:
+        t = [random.uniform(0.12, 1.0) for _ in range(self._N)]
+        # one neighbour-averaging pass keeps the profile organic, not jagged
+        self._targets = [
+            (t[max(0, i - 1)] + 2.0 * t[i] + t[min(self._N - 1, i + 1)])
+            * 0.25
+            for i in range(self._N)
+        ]
+
+    # ── curve helpers ─────────────────────────────────────────────────────
+
+    def _display(self, phase: float, scale: float) -> list:
+        """Per-point displayed amplitude 0..1: Hann profile + breathing."""
+        heights, profile = self._heights, self._profile
+        return [
+            heights[i] * profile[i]
+            * (0.72 + 0.28 * math.sin(phase - i * 0.55)) * scale
+            for i in range(self._N)
+        ]
+
+    def _sample(self, disp: list, u: float) -> float:
+        """Catmull-Rom sample of the displayed amplitudes at fraction u."""
+        f = u * (self._N - 1)
+        i = min(self._N - 2, max(0, int(f)))
+        t = f - i
+        p0 = disp[max(0, i - 1)]
+        p1 = disp[i]
+        p2 = disp[i + 1]
+        p3 = disp[min(self._N - 1, i + 2)]
+        return 0.5 * ((2.0 * p1) + (-p0 + p2) * t
+                      + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t
+                      + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t)
+
+    @staticmethod
+    def _smooth_path(pts: list) -> QPainterPath:
+        """Catmull-Rom spline through pts, emitted as cubic Béziers."""
+        path = QPainterPath(pts[0])
+        n = len(pts)
+        for i in range(n - 1):
+            p0 = pts[max(0, i - 1)]
+            p1 = pts[i]
+            p2 = pts[i + 1]
+            p3 = pts[min(n - 1, i + 2)]
+            c1 = QPointF(p1.x() + (p2.x() - p0.x()) / 6.0,
+                         p1.y() + (p2.y() - p0.y()) / 6.0)
+            c2 = QPointF(p2.x() - (p3.x() - p1.x()) / 6.0,
+                         p2.y() - (p3.y() - p1.y()) / 6.0)
+            path.cubicTo(c1, c2, p2)
+        return path
+
+    # ── painting ──────────────────────────────────────────────────────────
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        w, h = self.width(), self.height()
-        n = self._N
-        gap = 2
-        bar_w = max(2, (w - gap * (n - 1)) // n)
-        total_w = n * bar_w + gap * (n - 1)
-        x0 = (w - total_w) // 2
-        radius = bar_w / 2
+        w, h = float(self.width()), float(self.height())
+        if w < 8.0:
+            p.end()
+            return
+        base_y = h - 3.0
+        span   = h - 9.0                 # max crest rise above the baseline
+        step   = w / (self._N - 1)
 
+        def pts(disp):
+            return [QPointF(i * step, base_y - disp[i] * span)
+                    for i in range(self._N)]
+
+        # layer 1 — back wave: phase-shifted, half amplitude → depth
+        back = self._smooth_path(pts(self._display(self._phase + 2.3, 0.5)))
+        pen = QPen(QColor(167, 139, 250, 45), 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(back)
+
+        # layer 2 — main wave: gradient fill under the curve…
+        crest = self._smooth_path(pts(self._display(self._phase, 1.0)))
+        fill = QPainterPath(crest)
+        fill.lineTo(w, h)
+        fill.lineTo(0.0, h)
+        fill.closeSubpath()
+        grad = QLinearGradient(0.0, 0.0, 0.0, h)
+        grad.setColorAt(0.0, QColor(108, 99, 255, 150))
+        grad.setColorAt(1.0, QColor(108, 99, 255, 0))
         p.setPen(Qt.PenStyle.NoPen)
-        for i in range(n):
-            bh = max(3, int(self._heights[i] * (h - 2)))
-            x = x0 + i * (bar_w + gap)
-            y = h - bh
+        p.fillPath(fill, QBrush(grad))
 
-            grad = QLinearGradient(x, y, x, h)
-            grad.setColorAt(0.0, QColor(108, 99, 255, 220))
-            grad.setColorAt(1.0, QColor(167, 139, 250, 100))
-            p.setBrush(QBrush(grad))
-            # bottom edge extends past the widget so only the tops are rounded
-            p.drawRoundedRect(QRectF(x, y, bar_w, bh + radius), radius, radius)
+        # …then the crest: wide translucent glow + thin bright core
+        line = QLinearGradient(0.0, 0.0, w, 0.0)
+        line.setColorAt(0.0, QColor(108, 99, 255, 60))
+        line.setColorAt(1.0, QColor(167, 139, 250, 60))
+        pen = QPen(QBrush(line), 6.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(crest)
+
+        line.setColorAt(0.0, QColor(108, 99, 255, 235))
+        line.setColorAt(1.0, QColor(167, 139, 250, 235))
+        pen = QPen(QBrush(line), 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawPath(crest)
+
+        # layer 3 — sparks: slow pulsing dots riding the crest, faded by
+        # overall energy so they vanish together with the wave on pause
+        energy = sum(self._heights) / self._N
+        vis = max(0.0, min(1.0, (energy - self._IDLE) / 0.25))
+        if vis > 0.02:
+            disp = self._display(self._phase, 1.0)
+            now = time.monotonic()
+            p.setPen(Qt.PenStyle.NoPen)
+            for u, _speed, ph, pulse_hz in self._sparks:
+                x = u * w
+                y = base_y - self._sample(disp, u) * span
+                a = vis * (0.55 + 0.45 * math.sin(now * pulse_hz + ph))
+                p.setBrush(QColor(167, 139, 250, int(70 * a)))
+                p.drawEllipse(QPointF(x, y), 3.4, 3.4)
+                p.setBrush(QColor(232, 232, 245, int(200 * a)))
+                p.drawEllipse(QPointF(x, y), 1.3, 1.3)
 
         p.end()
 
