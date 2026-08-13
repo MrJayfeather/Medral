@@ -560,7 +560,11 @@ def _play_startup_sound() -> None:
     """
     try:
         import winsound
-        path = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "sounds" / "startup.wav"
+        # A startup.wav dropped next to the exe overrides the bundled one,
+        # so the sound can be swapped without rebuilding
+        override = Path(sys.executable).parent / "startup.wav"
+        bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "sounds" / "startup.wav"
+        path = override if override.is_file() else bundled
         winsound.PlaySound(
             str(path),
             winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
@@ -643,9 +647,10 @@ def main() -> None:
     splash_cls = SplashScreen if SPLASH_VERSION == "v1" else SplashScreenV2
     splash = splash_cls()
     splash.show()
-    _play_startup_sound()
 
     def _on_splash_done() -> None:
+        # The chime marks the moment loading ends and the window appears
+        _play_startup_sound()
         window.show()
         QTimer.singleShot(800, client.fetch_guilds)
         if token is not None:

@@ -57,22 +57,25 @@ class _PauseWhenHidden(QObject):
             pass   # widget or animation already destroyed
 
 
-def fade_in(widget, ms: int = 350, dy: int = 14):
+def fade_in(widget, ms: int = 350, dy: int = 14, effect=None):
     """Fade a widget in with a soft upward slide (OutQuint).
 
-    The temporary opacity effect is removed when the animation finishes, so
-    the widget returns to plain (cheaper) rendering.  Returns the animation
-    group; keeping a reference is optional (it is parented to the widget).
+    Reuses `effect` if the caller already installed a QGraphicsOpacityEffect
+    (replacing an installed effect deletes it — Qt may crash if that happens
+    while it is painting, so there must be exactly one effect per widget).
+    The effect is detached AFTER the animation via a deferred singleShot —
+    never synchronously from the finished signal.
     """
-    effect = QGraphicsOpacityEffect(widget)
-    effect.setOpacity(0.0)
-    widget.setGraphicsEffect(effect)
+    if effect is None or widget.graphicsEffect() is not effect:
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(0.0)
+        widget.setGraphicsEffect(effect)
 
     group = QParallelAnimationGroup(widget)
 
     fade = QPropertyAnimation(effect, b"opacity", group)
     fade.setDuration(ms)
-    fade.setStartValue(0.0)
+    fade.setStartValue(effect.opacity())
     fade.setEndValue(1.0)
     fade.setEasingCurve(QEasingCurve.Type.OutQuint)
     group.addAnimation(fade)
@@ -86,12 +89,17 @@ def fade_in(widget, ms: int = 350, dy: int = 14):
         slide.setEasingCurve(QEasingCurve.Type.OutQuint)
         group.addAnimation(slide)
 
-    def _cleanup() -> None:
+    def _detach() -> None:
         try:
             if widget.graphicsEffect() is effect:
                 widget.setGraphicsEffect(None)
         except RuntimeError:
             pass
+
+    def _cleanup() -> None:
+        # Deferred: detaching (= deleting) the effect inside the finished
+        # handler can race the effect's own paint pass and crash natively
+        QTimer.singleShot(0, _detach)
 
     group.finished.connect(_cleanup)
     group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
@@ -166,9 +174,12 @@ def stagger(widgets, step_ms: int = 60, ms: int = 350, dy: int = 14) -> None:
         effect.setOpacity(0.0)
         w.setGraphicsEffect(effect)
 
-        def _start(w=w) -> None:
+        def _start(w=w, effect=effect) -> None:
             try:
-                fade_in(w, ms, dy)
+                # Pass the pre-hide effect along — fade_in reuses it instead
+                # of replacing it (replacement deletes the installed effect
+                # and can crash Qt mid-paint)
+                fade_in(w, ms, dy, effect=effect)
             except RuntimeError:
                 pass   # widget destroyed before its turn
 

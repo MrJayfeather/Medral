@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFrame, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QEasingCurve, QRectF, QVariantAnimation
-from PyQt6.QtGui import QKeyEvent, QColor, QPainter, QPen
+from PyQt6.QtGui import QKeyEvent, QColor, QPainter, QPainterPath, QPen
 
 from ui.anim import glow, stagger
 from ui.elide import ElideLabel
@@ -75,13 +75,10 @@ class SearchPanel(QWidget):
             else:
                 row.setVisible(False)
         if shown:
-            # settle geometry first so the slide targets are correct
-            lay = self._results_widget.layout()
-            if lay is not None:
-                lay.activate()
-            if self.layout() is not None:
-                self.layout().activate()
-            stagger(shown, step_ms=55, ms=320, dy=10)
+            # Opacity-only cascade: rows are layout-managed, so animating
+            # their pos fights the layout (rows stuck shifted/clipped after
+            # a resize mid-animation — e.g. going fullscreen)
+            stagger(shown, step_ms=55, ms=320, dy=0)
 
     def clear(self) -> None:
         self._input.clear()
@@ -120,7 +117,11 @@ class SearchPanel(QWidget):
 # ── result row widget ──────────────────────────────────────────────────────
 
 class _GlowButton(QPushButton):
-    """Push button with an accent glow while hovered."""
+    """Push button with an accent glow while hovered and a vector play glyph.
+
+    The "▶" character renders as a colored emoji on Windows and ignores QSS
+    color, so the triangle is painted by hand on top of the styled frame.
+    """
 
     def enterEvent(self, ev) -> None:
         glow(self, blur=18)
@@ -130,6 +131,25 @@ class _GlowButton(QPushButton):
         if self.graphicsEffect() is not None:
             self.setGraphicsEffect(None)
         super().leaveEvent(ev)
+
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)   # QSS background + border
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#A78BFA") if self.underMouse() else QColor("#6C63FF")
+        w, h = self.width(), self.height()
+        s = 10.0                       # triangle size in px
+        cx, cy = w / 2 + 0.8, h / 2    # slight optical shift to the right
+        path = QPainterPath()
+        path.moveTo(cx - s * 0.42, cy - s * 0.55)
+        path.lineTo(cx + s * 0.58, cy)
+        path.lineTo(cx - s * 0.42, cy + s * 0.55)
+        path.closeSubpath()
+        p.setPen(QPen(color, 2.4, Qt.PenStyle.SolidLine,
+                      Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(color)
+        p.drawPath(path)
+        p.end()
 
 
 class _ResultRow(QFrame):
@@ -144,6 +164,7 @@ class _ResultRow(QFrame):
         )
         self._url = ""
         self._hover = 0.0
+        self.setFixedHeight(54)   # rows must not stretch with the panel
         self._hover_anim = QVariantAnimation(self)
         self._hover_anim.setDuration(150)
         self._hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -172,13 +193,13 @@ class _ResultRow(QFrame):
 
         lay.addLayout(info, 1)
 
-        btn = _GlowButton("▶")
+        btn = _GlowButton("")   # glyph is painted, not a text character
         btn.setObjectName("resultPlayBtn")
         btn.setFixedSize(32, 32)
         btn.setToolTip("Add to queue")
         btn.clicked.connect(lambda: self.play_clicked.emit(self._url))
         # stretch 0 — the button keeps its fixed 32x32 and is never squeezed
-        lay.addWidget(btn, 0)
+        lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_track(self, track: dict) -> None:
         self._url = track.get("webpage_url", "")
