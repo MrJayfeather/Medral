@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from typing import Optional, Dict, Callable, Awaitable, Tuple
 
 from audio import (
+    DEFAULT_SETTINGS,
     LOOP_MODES,
     MusicPlayer,
     Track,
@@ -156,7 +157,7 @@ def _snapshot_players() -> dict:
         non_default = (
             p.loop_mode != "none"
             or abs(p.volume - 0.5) > 1e-9
-            or p.settings != {"normalize": True, "radio": False}
+            or p.settings != DEFAULT_SETTINGS
         )
         if not queue and not non_default:
             continue
@@ -932,6 +933,13 @@ async def api_set_settings(guild_id: int, settings: dict) -> dict:
     # next play_next() — which never comes for an empty queue.
     if settings.get("radio") and p.current and not p.queue:
         p._start_prefetch()
+    # Crossfade switched on mid-track: start the monitor now — play_next
+    # only arms it at track start. A paused track counts too (the monitor
+    # just waits while the position is frozen). Switching it off is noticed
+    # by the monitor itself on its next tick (which also drops anything
+    # prepared).
+    if settings.get("crossfade") and (p.is_playing or p.is_paused):
+        p._start_crossfade_watch()
     await _notify(guild_id)
     return {"ok": True, "settings": dict(p.settings)}
 

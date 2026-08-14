@@ -373,7 +373,7 @@ def _empty_state(guild_id: int) -> dict:
         "is_paused": False,
         "volume": 0.5,
         "loop_mode": "none",
-        "settings": {"normalize": True, "radio": False},
+        "settings": {"normalize": True, "radio": False, "crossfade": False},
         "voice_channel_id": None,
     }
 
@@ -441,7 +441,8 @@ class PlaylistBody(BaseModel):
 
 class SettingsBody(BaseModel):
     guild_id: int
-    settings: dict   # partial update: {"normalize"?: bool, "radio"?: bool}
+    settings: dict   # partial update:
+                     # {"normalize"?: bool, "radio"?: bool, "crossfade"?: bool}
 
     @field_validator("settings")
     @classmethod
@@ -449,7 +450,7 @@ class SettingsBody(BaseModel):
         if not v:
             raise ValueError("settings must not be empty")
         for key, value in v.items():
-            if key not in ("normalize", "radio"):
+            if key not in ("normalize", "radio", "crossfade"):
                 raise ValueError(f"unknown setting: {key}")
             if not isinstance(value, bool):
                 raise ValueError(f"setting '{key}' must be a boolean")
@@ -696,7 +697,7 @@ async def set_loop(body: LoopBody, session: dict = Depends(get_session)):
 
 @app.post("/settings")
 async def set_settings(body: SettingsBody, session: dict = Depends(get_session)):
-    """Partial update of per-guild playback settings (normalize/radio)."""
+    """Partial update of per-guild playback settings (normalize/radio/crossfade)."""
     await _require_same_channel(session, body.guild_id)
     return _ok_or_raise(await music_bot.api_set_settings(body.guild_id, body.settings))
 

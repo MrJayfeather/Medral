@@ -1,8 +1,11 @@
 import asyncio
+import audioop
 import hashlib
+import math
 import os
 import random
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -51,6 +54,20 @@ FFMPEG_OPTIONS = {
 # loudnorm can't hit the exact integrated target a two-pass run would, but it
 # evens out quiet/loud tracks well enough for live playback.
 LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
+# ------------------------------------------------------------------ crossfade
+# Overlapped track transitions: near the end of the current track the next
+# source is pre-spawned and mixed in with equal-power gain curves.
+
+CROSSFADE_SEC = 6
+SKIP_FADE_SEC = 0.5
+FRAME_BYTES = 3840              # 20 ms of 48 kHz s16le stereo
+FRAMES_PER_SEC = 50
+CROSSFADE_FRAMES = CROSSFADE_SEC * FRAMES_PER_SEC        # 300
+SKIP_FADE_FRAMES = int(SKIP_FADE_SEC * FRAMES_PER_SEC)   # 25
+CROSSFADE_PREPARE_LEAD = 5      # s before the overlap point to start preparing
+
+DEFAULT_SETTINGS = {"normalize": True, "radio": False, "crossfade": False}
 
 
 def _ffmpeg_output_opts(player: "MusicPlayer") -> str:
@@ -427,6 +444,218 @@ LOOP_ALL = "all"
 LOOP_MODES = (LOOP_NONE, LOOP_ONE, LOOP_ALL)
 
 
+@dataclass
+class PreparedNext:
+    """Next-track source spawned ahead of time for a crossfade."""
+    track: Track
+    raw: discord.AudioSource      # FFmpegPCMAudio, process already spawned
+    stream_url: str
+    file: Optional[str]           # local cache copy, if any
+
+
+class CrossfadeSource(discord.AudioSource):
+    """Pass-through mixer wrapped around every raw FFmpeg source.
+
+    Outside a fade it forwards frames from the current source untouched
+    (zero overhead). During a crossfade it mixes the outgoing and incoming
+    sources with equal-power gain curves; during a skip/stop fade it only
+    attenuates the current source down to silence.
+
+    read() runs on the voice send thread with a 20 ms budget and must never
+    raise. The mutating entry points run on the event loop; the lock guards
+    only pointer/counter swaps and is held for microseconds.
+    """
+
+    def __init__(self, current: discord.AudioSource):
+        self._lock = threading.Lock()
+        self._current: Optional[discord.AudioSource] = current
+        self._next: Optional[discord.AudioSource] = None
+        self._gains: List[tuple] = []       # (gain_out, gain_in) per frame
+        self._fade_pos: int = 0
+        self._fade_out_only: bool = False
+        self._current_eof: bool = False
+        self._next_eof: bool = False
+        self._on_done: Optional[Callable[[discord.AudioSource], None]] = None
+
+    @staticmethod
+    def _gain_table(frames: int) -> List[tuple]:
+        # Equal-power curves sampled at frame centers: summed power
+        # gain_out^2 + gain_in^2 == 1 across the whole fade.
+        return [
+            (
+                math.cos((i + 0.5) / frames * math.pi / 2),
+                math.sin((i + 0.5) / frames * math.pi / 2),
+            )
+            for i in range(frames)
+        ]
+
+    def start_fade(
+        self,
+        nxt: discord.AudioSource,
+        frames: int,
+        on_done: Callable[[discord.AudioSource], None],
+    ) -> None:
+        """Begin mixing `nxt` in over `frames` frames (event-loop side).
+
+        on_done receives the displaced current source once the fade completes;
+        it is invoked from the send thread and must only hand off elsewhere.
+        """
+        table = self._gain_table(frames)
+        with self._lock:
+            self._next = nxt
+            self._gains = table
+            self._fade_pos = 0
+            self._fade_out_only = False
+            self._current_eof = False
+            self._next_eof = False
+            self._on_done = on_done
+
+    def start_fade_out(self, frames: int) -> None:
+        """Fade the current source to silence, then report EOF."""
+        table = self._gain_table(frames)
+        with self._lock:
+            self._next = None
+            self._gains = table
+            self._fade_pos = 0
+            self._fade_out_only = True
+            self._current_eof = False
+            self._next_eof = False
+            self._on_done = None
+
+    def is_fading(self) -> bool:
+        with self._lock:
+            return bool(self._gains)
+
+    @staticmethod
+    def _pad(buf: bytes) -> bytes:
+        # audioop.add() requires equal-length fragments — zero-fill the last
+        # short frame a dying source hands out.
+        if 0 < len(buf) < FRAME_BYTES:
+            return buf + b"\x00" * (FRAME_BYTES - len(buf))
+        return buf
+
+    @staticmethod
+    def _safe_read(src: Optional[discord.AudioSource]) -> bytes:
+        if src is None:
+            return b""
+        try:
+            return src.read()
+        except Exception as exc:
+            print(f"[crossfade] source read error: {exc}")
+            return b""
+
+    def read(self) -> bytes:
+        with self._lock:
+            gains = self._gains
+            pos = self._fade_pos
+            fade_out_only = self._fade_out_only
+            cur = self._current
+            nxt = self._next
+
+        if not gains:
+            # No fade in progress — plain pass-through.
+            return self._safe_read(cur)
+
+        if fade_out_only:
+            if pos >= len(gains):
+                return b""
+            a = self._safe_read(cur)
+            if not a:
+                return b""
+            with self._lock:
+                self._fade_pos = pos + 1
+            return audioop.mul(self._pad(a), 2, gains[pos][0])
+
+        # Full crossfade: mix the outgoing (A) and incoming (B) sources.
+        # The eof flags are only touched by this (send) thread during a fade.
+        a = b""
+        if not self._current_eof:
+            a = self._safe_read(cur)
+            if not a:
+                self._current_eof = True
+            elif len(a) < FRAME_BYTES:
+                self._current_eof = True   # short frame — EOF from next read on
+
+        b = b""
+        if not self._next_eof:
+            b = self._safe_read(nxt)
+            if not b:
+                self._next_eof = True
+            elif len(b) < FRAME_BYTES:
+                self._next_eof = True
+
+        if not b:
+            # The incoming source died right after the fade started — cancel
+            # the fade and let the outgoing one play out normally; play_next
+            # then advances past the dead track (accepted degradation).
+            with self._lock:
+                self._next = None
+                self._gains = []
+                self._fade_pos = 0
+                self._on_done = None
+            if nxt is not None:
+                try:
+                    nxt.cleanup()
+                except Exception:
+                    pass
+            print("[crossfade] next source died mid-fade; "
+                  "falling back to a plain transition")
+            return a
+
+        g_out, g_in = gains[pos]
+        if not a:
+            # Outgoing track ended early (overstated duration) — keep the
+            # incoming one on its fade-in curve so there is no volume jump.
+            out = audioop.mul(self._pad(b), 2, g_in)
+        else:
+            out = audioop.add(
+                audioop.mul(self._pad(a), 2, g_out),
+                audioop.mul(self._pad(b), 2, g_in),
+                2,
+            )
+
+        pos += 1
+        if pos >= len(gains):
+            # Fade complete — promote the incoming source to current.
+            with self._lock:
+                old = self._current
+                self._current = self._next
+                self._next = None
+                self._gains = []
+                self._fade_pos = 0
+                self._current_eof = False
+                self._next_eof = False
+                on_done = self._on_done
+                self._on_done = None
+            if on_done is not None:
+                try:
+                    on_done(old)
+                except Exception as exc:
+                    print(f"[crossfade] on_done callback error: {exc}")
+        else:
+            with self._lock:
+                self._fade_pos = pos
+        return out
+
+    def cleanup(self) -> None:
+        # Called by the AudioPlayer thread on vc.stop() — killing the ffmpeg
+        # processes from that thread is what py-cord does today anyway.
+        with self._lock:
+            cur = self._current
+            nxt = self._next
+            self._current = None
+            self._next = None
+            self._gains = []
+            self._fade_pos = 0
+            self._on_done = None
+        for src in (cur, nxt):
+            if src is not None:
+                try:
+                    src.cleanup()
+                except Exception:
+                    pass
+
+
 class MusicPlayer:
     def __init__(
         self,
@@ -447,12 +676,17 @@ class MusicPlayer:
         self._seeking: bool = False
         self.loop_mode: str = LOOP_NONE
         # Per-guild playback settings, persisted across restarts by bot.py
-        self.settings: dict = {"normalize": True, "radio": False}
+        self.settings: dict = dict(DEFAULT_SETTINGS)
         # Serializes play_next/seek — a seek arriving while the next track is
         # still downloading must not spawn a second concurrent audio source.
         self._play_lock = asyncio.Lock()
         # Background prefetch of the upcoming track (one task per player)
         self._prefetch_task: Optional[asyncio.Task] = None
+        # Crossfade machinery: the per-track pass-through mixer, the
+        # pre-spawned next source and the monitor task arming the overlap
+        self._mixer: Optional[CrossfadeSource] = None
+        self._next_prepared: Optional[PreparedNext] = None
+        self._crossfade_task: Optional[asyncio.Task] = None
 
         # progress tracking
         self._play_started_at: float = 0.0
@@ -513,6 +747,16 @@ class MusicPlayer:
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             return
 
+        # The monitor watching the finished track is stale now, and a
+        # prepared source that no longer matches the queue head must not
+        # leak its ffmpeg process (stop / queue mutations).
+        if self._crossfade_task is not None and not self._crossfade_task.done():
+            self._crossfade_task.cancel()
+        if self._next_prepared is not None and (
+            not self.queue or self.queue[0] is not self._next_prepared.track
+        ):
+            self._discard_prepared()
+
         # Route the finished track according to loop mode. current may already
         # be None here (previous() clears it before stopping the source).
         if self.current:
@@ -537,6 +781,22 @@ class MusicPlayer:
             self.current = self.queue.popleft()
             self._paused = False
             self._total_paused = 0.0
+
+            prepared = self._next_prepared
+            if prepared is not None and prepared.track is self.current:
+                # A source prepared for a crossfade that never started —
+                # reuse it for an instant plain transition.
+                self._next_prepared = None
+                self._current_stream_url = prepared.stream_url
+                old_file = self._current_file
+                self._current_file = prepared.file
+                if old_file and old_file != prepared.file:
+                    try:
+                        os.remove(old_file)
+                    except OSError:
+                        pass
+                raw_source = prepared.raw
+                break
 
             try:
                 stream_url = await get_stream_url(self.current)
@@ -567,12 +827,18 @@ class MusicPlayer:
                         before_options=FFMPEG_OPTIONS["before_options"],
                         options=_ffmpeg_output_opts(self),
                     )
-                source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
                 break
             except Exception as exc:
                 print(f"[audio] cannot play {self.current.title}: {exc}")
                 self.history.append(self.current)
                 self.current = None
+
+        # Every raw source goes through the pass-through mixer, so enabling
+        # crossfade mid-track works immediately; the master volume stays on
+        # top of (i.e. after) the mix.
+        mixer = CrossfadeSource(raw_source)
+        self._mixer = mixer
+        source = discord.PCMVolumeTransformer(mixer, volume=self._volume)
 
         self._play_started_at = time.time()
         loop = asyncio.get_running_loop()
@@ -584,6 +850,8 @@ class MusicPlayer:
                 loop.create_task(self.play_next())
 
         self.voice_client.play(source, after=_after)
+        if self.settings.get("crossfade"):
+            self._start_crossfade_watch()
         # Warm up what comes next (lazy resolve / pre-download / radio refill)
         # in the background — never blocks or affects the track just started.
         self._start_prefetch()
@@ -667,6 +935,236 @@ class MusicPlayer:
             print(f"[radio] queued {len(picked)} related track(s) "
                   f"after {current.title!r}")
 
+    # ------------------------------------------------------------------ crossfade
+
+    def _start_crossfade_watch(self) -> None:
+        """(Re)start the monitor that arms the overlap for the current track."""
+        old = self._crossfade_task
+        if old is not None and not old.done():
+            old.cancel()
+        self._crossfade_task = asyncio.get_running_loop().create_task(
+            self._crossfade_watch()
+        )
+
+    async def _crossfade_watch(self) -> None:
+        """Watch the current track and fire the overlap near its end.
+
+        Prepares the next source CROSSFADE_PREPARE_LEAD seconds before the
+        overlap point and promotes it once the remaining time drops to
+        CROSSFADE_SEC. Exits (discarding anything prepared) as soon as any
+        precondition breaks; every failure degrades to the regular
+        play_next() transition.
+        """
+        track = self.current
+        if track is None:
+            return
+        try:
+            while True:
+                if (
+                    self.current is not track
+                    or not self.settings.get("crossfade")
+                    or self.loop_mode == LOOP_ONE
+                    or track.duration <= 0
+                    or not self.voice_client
+                    or not self.voice_client.is_connected()
+                    or self._mixer is None
+                ):
+                    self._discard_prepared()
+                    return
+                # position is wall-clock and freezes on pause, so the monitor
+                # simply keeps waiting while playback is paused.
+                remaining = track.duration - self.position
+                if (
+                    remaining <= CROSSFADE_SEC + CROSSFADE_PREPARE_LEAD
+                    and self._next_prepared is None
+                    and self.queue
+                ):
+                    await self._prepare_next()
+                if remaining <= CROSSFADE_SEC:
+                    if self._next_prepared is not None:
+                        # On failure the track plays out and play_next reuses
+                        # the prepared source (plain transition).
+                        await self._promote_next(CROSSFADE_FRAMES)
+                    return
+                if remaining > CROSSFADE_SEC + CROSSFADE_PREPARE_LEAD + 3:
+                    await asyncio.sleep(2.0)
+                else:
+                    await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[crossfade] watch error (guild {self.guild_id}): {exc}")
+
+    async def _prepare_next(self) -> None:
+        """Spawn the FFmpeg source for queue[0] ahead of the overlap.
+
+        Mirrors what play_next does for a fresh track (lazy resolve, cache
+        download for long tracks) but never touches the playing source. All
+        failures are logged and leave _next_prepared unset.
+        """
+        try:
+            if not self.queue:
+                return
+            nxt = self.queue[0]
+            was_lazy = not nxt.webpage_url and bool(nxt.search_query)
+            # Resolves lazy (Spotify) tracks in place — identity is preserved
+            stream_url = await get_stream_url(nxt)
+            if not stream_url:
+                return
+            if was_lazy:
+                # Clients show the resolved metadata right away
+                await self._on_state_change(self.guild_id)
+            file = None
+            if 0 < nxt.duration and nxt.duration >= PREBUFFER_MIN_DURATION:
+                file = await download_track(stream_url, nxt)
+            # Re-check after the awaits: the queue may have mutated or the
+            # setting may have been flipped while we were resolving.
+            if not (
+                self.queue
+                and self.queue[0] is nxt
+                and self.settings.get("crossfade")
+            ):
+                return
+            if file:
+                raw = discord.FFmpegPCMAudio(
+                    file, options=_ffmpeg_output_opts(self)
+                )
+            else:
+                raw = discord.FFmpegPCMAudio(
+                    stream_url,
+                    before_options=FFMPEG_OPTIONS["before_options"],
+                    options=_ffmpeg_output_opts(self),
+                )
+            self._next_prepared = PreparedNext(nxt, raw, stream_url, file)
+        except Exception as exc:
+            print(f"[crossfade] prepare failed (guild {self.guild_id}): {exc}")
+
+    async def _promote_next(self, fade_frames: int) -> bool:
+        async with self._play_lock:
+            return await self._promote_next_locked(fade_frames)
+
+    async def _promote_next_locked(self, fade_frames: int) -> bool:
+        """Start the overlap: fade the prepared source in as the new current.
+
+        Returns False (leaving the prepared source for play_next to reuse)
+        when any precondition fails. The identity check on queue[0] covers
+        shuffle/move/remove/previous happening between prepare and promote.
+        """
+        prepared = self._next_prepared
+        if (
+            prepared is None
+            or not self.voice_client
+            or not self.voice_client.is_connected()
+            or not self.voice_client.is_playing()
+            or self._paused
+            or self._mixer is None
+            or self._mixer.is_fading()
+            or not self.queue
+            or self.queue[0] is not prepared.track
+            or not self.settings.get("crossfade")
+        ):
+            return False
+
+        self._next_prepared = None
+        nxt = self.queue.popleft()
+        old = self.current
+        if old is not None:
+            # Mirror play_next's routing (LOOP_ONE never reaches promotion)
+            if self.loop_mode == LOOP_ALL:
+                self.queue.append(old)
+            else:
+                self.history.append(old)
+
+        # UI contract: the incoming track becomes current the moment its
+        # audio starts, with its position counting up from zero.
+        self.current = nxt
+        self._paused = False
+        self._total_paused = 0.0
+        self._play_started_at = time.time()
+        old_file = self._current_file
+        self._current_file = prepared.file
+        self._current_stream_url = prepared.stream_url
+
+        loop = asyncio.get_running_loop()
+        self._mixer.start_fade(
+            prepared.raw,
+            fade_frames,
+            # Fired from the send thread when the fade completes — hop back
+            # to the loop for the actual cleanup of the outgoing source.
+            on_done=lambda old_raw: loop.call_soon_threadsafe(
+                self._fade_done, old_raw, old_file
+            ),
+        )
+        self._start_prefetch()
+        self._start_crossfade_watch()
+        await self._on_state_change(self.guild_id)
+        return True
+
+    def _fade_done(
+        self, old_raw: discord.AudioSource, old_file: Optional[str]
+    ) -> None:
+        """Dispose of the faded-out source (and its cache file) off-loop."""
+        current_file = self._current_file
+
+        def _cleanup() -> None:
+            try:
+                old_raw.cleanup()
+            except Exception:
+                pass
+            # Windows can't delete a file its ffmpeg still reads — remove
+            # strictly after cleanup, in the same executor job.
+            if old_file and old_file != current_file:
+                try:
+                    os.remove(old_file)
+                except OSError:
+                    pass
+
+        asyncio.get_running_loop().run_in_executor(None, _cleanup)
+
+    async def _crossfade_skip(self, expected: Optional[Track]) -> None:
+        """Manual skip with crossfade on: quick fade into the next track."""
+        async with self._play_lock:
+            if self.current is not expected:
+                # The track ended on its own while this task waited for the
+                # lock and play_next already started the following one — the
+                # skip is satisfied, leave the new track alone.
+                return
+            mixer = self._mixer
+            if mixer is None or mixer.is_fading():
+                # A second skip during a fade (or a vanished source) —
+                # plain hard stop wins.
+                if self.voice_client and (
+                    self.voice_client.is_playing()
+                    or self.voice_client.is_paused()
+                ):
+                    self.voice_client.stop()
+                return
+            if (
+                self._next_prepared is not None
+                and self.queue
+                and self.queue[0] is self._next_prepared.track
+                and await self._promote_next_locked(SKIP_FADE_FRAMES)
+            ):
+                return
+            # Nothing usable prepared — short fade-out, then the regular
+            # after -> play_next transition (no hard-cut click).
+            mixer.start_fade_out(SKIP_FADE_FRAMES)
+
+    def _discard_prepared(self) -> None:
+        """Drop the prepared next source, killing its ffmpeg off-loop."""
+        prepared = self._next_prepared
+        if prepared is None:
+            return
+        self._next_prepared = None
+
+        def _cleanup() -> None:
+            try:
+                prepared.raw.cleanup()
+            except Exception:
+                pass
+
+        asyncio.get_running_loop().run_in_executor(None, _cleanup)
+
     # ------------------------------------------------------------------ controls
 
     def pause(self) -> None:
@@ -715,7 +1213,11 @@ class MusicPlayer:
             }
             seek_target = self._current_stream_url
         raw_source = discord.FFmpegPCMAudio(seek_target, **seek_opts)
-        source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
+        # vc.stop() above disposed the previous mixer (both of its sources);
+        # wrap the new one the same way so crossfade keeps working after seek.
+        mixer = CrossfadeSource(raw_source)
+        self._mixer = mixer
+        source = discord.PCMVolumeTransformer(mixer, volume=self._volume)
 
         self._play_started_at = time.time() - position
         self._total_paused = 0.0
@@ -743,7 +1245,19 @@ class MusicPlayer:
                 # Manual skip should advance even in repeat-one mode
                 self.history.append(self.current)
                 self.current = None
-            self.voice_client.stop()  # triggers _after -> play_next
+            if (
+                self.settings.get("crossfade")
+                and self._mixer is not None
+                and not self._paused
+                and not self._mixer.is_fading()
+            ):
+                # Quick fade into the next track instead of a hard cut.
+                # A second skip during that fade takes the else branch.
+                asyncio.get_running_loop().create_task(
+                    self._crossfade_skip(self.current)
+                )
+            else:
+                self.voice_client.stop()  # triggers _after -> play_next
 
     async def previous(self) -> None:
         if not self.history:
@@ -809,6 +1323,10 @@ class MusicPlayer:
         # A prefetch working for the queue we just cleared is pointless
         if self._prefetch_task is not None and not self._prefetch_task.done():
             self._prefetch_task.cancel()
+        # Same goes for the crossfade monitor and its prepared source
+        if self._crossfade_task is not None and not self._crossfade_task.done():
+            self._crossfade_task.cancel()
+        self._discard_prepared()
         if self.voice_client:
             # Set the flag only when a real disconnect will follow — the flag
             # is consumed by on_voice_state_update, and without a disconnect
@@ -819,6 +1337,8 @@ class MusicPlayer:
                 self.voice_client.stop()
             await self.voice_client.disconnect()
             self.voice_client = None
+        # vc.stop() above disposed both mixer sources via CrossfadeSource.cleanup
+        self._mixer = None
         self.current = None
         self._paused = False
         if self._current_file:

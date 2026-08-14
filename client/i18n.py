@@ -203,6 +203,14 @@ _CATALOG: dict[str, dict[str, str]] = {
         "ru": "Когда очередь кончается, бот продолжает похожими треками",
         "en": "When the queue ends, the bot continues with similar tracks",
     },
+    "crossfade_title": {
+        "ru": "Кроссфейд",
+        "en": "Crossfade",
+    },
+    "crossfade_sub": {
+        "ru": "Плавный переход между треками (6 секунд)",
+        "en": "Smooth 6-second transition between tracks",
+    },
     "section_app": {
         "ru": "ПРИЛОЖЕНИЕ",
         "en": "APPLICATION",

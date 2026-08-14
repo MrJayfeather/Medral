@@ -136,7 +136,7 @@ class SettingsView(QWidget):
     back_requested    = pyqtSignal()
     connect_requested = pyqtSignal(str, int)   # host, port
     logout_requested  = pyqtSignal()
-    settings_changed  = pyqtSignal(str, bool)  # key ("normalize"/"radio"), value
+    settings_changed  = pyqtSignal(str, bool)  # key ("normalize"/"radio"/"crossfade"), value
     language_changed  = pyqtSignal(str)        # "ru" | "en"
 
     def __init__(self, parent=None) -> None:
@@ -262,6 +262,11 @@ class SettingsView(QWidget):
             c_lay, "radio",
             tr("radio_title"),
             tr("radio_sub"),
+        )
+        self._crossfade_toggle = self._add_toggle_row(
+            c_lay, "crossfade",
+            tr("crossfade_title"),
+            tr("crossfade_sub"),
         )
 
         c_lay.addSpacing(8)
@@ -419,6 +424,7 @@ class SettingsView(QWidget):
         for key, toggle in (
             ("normalize", self._normalize_toggle),
             ("radio",     self._radio_toggle),
+            ("crossfade", self._crossfade_toggle),
         ):
             value = settings.get(key)
             if isinstance(value, bool) and toggle.isChecked() != value:
@@ -428,6 +434,7 @@ class SettingsView(QWidget):
         """Disable toggles (dimmed to 0.4 opacity) when no guild is selected."""
         self._normalize_toggle.setEnabled(enabled)
         self._radio_toggle.setEnabled(enabled)
+        self._crossfade_toggle.setEnabled(enabled)
 
     def set_values(self, host: str, port: int) -> None:
         self._fallback_host = host
