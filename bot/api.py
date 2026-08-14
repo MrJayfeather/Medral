@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -706,12 +707,49 @@ async def remove_from_queue(body: QueueRemoveBody, session: dict = Depends(get_s
 
 # ------------------------------------------------------------------ client auto-update
 
+# md5 of CLIENT_EXE cached by (size, mtime_ns): rehashing a ~66 MB exe on
+# every /version request would be wasteful, so the digest is recomputed only
+# when the file on disk actually changes (new build deployed).
+_client_md5_cache: dict = {"key": None, "md5": None}
+
+
+def _client_exe_md5() -> Optional[str]:
+    """Return the md5 hex digest of CLIENT_EXE, or None when it is missing."""
+    try:
+        st = CLIENT_EXE.stat()
+    except OSError:
+        return None
+    key = (st.st_size, st.st_mtime_ns)
+    if _client_md5_cache["key"] == key:
+        return _client_md5_cache["md5"]
+    h = hashlib.md5()
+    try:
+        with open(CLIENT_EXE, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    digest = h.hexdigest()
+    # Set the digest before the key so a concurrent reader that matches the
+    # key never picks up a stale digest.
+    _client_md5_cache["md5"] = digest
+    _client_md5_cache["key"] = key
+    return digest
+
+
 @app.get("/version")
 async def get_version():
     """Latest client version and whether a client build is available."""
     version_file = REPO_ROOT / "version.txt"
     version = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else ""
-    return {"client": version, "client_available": CLIENT_EXE.exists()}
+    # Hash in a worker thread: the first request after a deploy reads ~66 MB
+    # and must not block the event loop (Discord heartbeat runs on it).
+    client_md5 = await asyncio.to_thread(_client_exe_md5)
+    return {
+        "client": version,
+        "client_available": CLIENT_EXE.exists(),
+        "client_md5": client_md5,
+    }
 
 
 @app.get("/update/client")

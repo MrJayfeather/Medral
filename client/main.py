@@ -42,7 +42,7 @@ if "--server" in sys.argv:
 
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QProgressBar, QWidget,
+    QLabel, QLineEdit, QPushButton, QWidget,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QFont
@@ -109,103 +109,6 @@ def _start_local_server() -> bool:
 
 # ── auto-update ───────────────────────────────────────────────────────────────
 
-class _Downloader(QObject):
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(str)
-    error    = pyqtSignal(str)
-
-    def __init__(self, url: str) -> None:
-        super().__init__()
-        self._url = url
-
-    def run(self) -> None:
-        import urllib.request
-        try:
-            tmp = tempfile.mktemp(suffix=".exe")
-            with urllib.request.urlopen(self._url, timeout=60) as resp:
-                total = int(resp.headers.get("content-length", 0))
-                done  = 0
-                with open(tmp, "wb") as f:
-                    while chunk := resp.read(65536):
-                        f.write(chunk)
-                        done += len(chunk)
-                        if total:
-                            self.progress.emit(int(done / total * 100))
-            self.finished.emit(tmp)
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class UpdateDialog(QDialog):
-    def __init__(self, current: str, latest: str, url: str) -> None:
-        super().__init__()
-        self._url = url
-        self.setWindowTitle("Обновление")
-        self.setFixedSize(380, 200)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(28, 24, 28, 24)
-        lay.setSpacing(12)
-
-        lay.addWidget(QLabel(
-            f"Доступна новая версия: <b>{latest}</b><br>Текущая: {current}"
-        ))
-
-        self._bar = QProgressBar()
-        self._bar.setRange(0, 100)
-        self._bar.setVisible(False)
-        lay.addWidget(self._bar)
-
-        self._status = QLabel("")
-        self._status.setStyleSheet("color:#7d8590; font-size:11px;")
-        lay.addWidget(self._status)
-
-        btn_row = QHBoxLayout()
-        self._skip = QPushButton("Пропустить")
-        self._skip.clicked.connect(self.reject)
-        btn_row.addWidget(self._skip)
-
-        self._update_btn = QPushButton("Обновить сейчас")
-        self._update_btn.setObjectName("primaryBtn")
-        self._update_btn.clicked.connect(self._start_download)
-        btn_row.addWidget(self._update_btn)
-        lay.addLayout(btn_row)
-
-    def _start_download(self) -> None:
-        self._update_btn.setEnabled(False)
-        self._skip.setEnabled(False)
-        self._bar.setVisible(True)
-        self._status.setText("Загрузка…")
-
-        self._dl = _Downloader(self._url)
-        self._dl.progress.connect(self._bar.setValue)
-        self._dl.finished.connect(self._on_done)
-        self._dl.error.connect(self._on_error)
-
-        t = threading.Thread(target=self._dl.run, daemon=True)
-        t.start()
-
-    def _on_done(self, tmp_path: str) -> None:
-        self._status.setText("Установка…")
-        exe = Path(sys.executable)
-        bat = tempfile.mktemp(suffix=".bat")
-        Path(bat).write_text(
-            f"@echo off\n"
-            f"ping 127.0.0.1 -n 3 >nul\n"
-            f'move /y "{tmp_path}" "{exe}"\n'
-            f'start "" "{exe}"\n'
-            f"del \"%~f0\"\n",
-            encoding="utf-8",
-        )
-        subprocess.Popen(["cmd", "/c", bat], creationflags=subprocess.CREATE_NO_WINDOW)
-        QApplication.quit()
-
-    def _on_error(self, msg: str) -> None:
-        self._status.setText(f"Ошибка: {msg}")
-        self._update_btn.setEnabled(True)
-        self._skip.setEnabled(True)
-
-
 def _ver_tuple(v: str):
     try:
         return tuple(int(x) for x in v.split("."))
@@ -213,41 +116,175 @@ def _ver_tuple(v: str):
         return (0,)
 
 
-class _UpdateChecker(QObject):
-    """Runs the blocking /version request off the UI thread (cf. _Downloader)."""
+class _AutoUpdater(QObject):
+    """Silent client self-update — no dialogs, ever.
 
-    update_available = pyqtSignal(str, str, str)   # current, latest, url
+    Periodically checks GET /version in a daemon thread; when the server has
+    a newer build, streams it into a temp file, verifies its md5 against the
+    server-provided client_md5 and only then emits update_ready(version).
+    A corrupted or truncated download is deleted immediately and retried on
+    the next cycle.  The actual swap is done by a .bat script: apply_now()
+    replaces the exe and restarts the app, apply_on_exit() (wired to
+    app.aboutToQuit) replaces it silently on the way out.
+    """
+
+    update_ready = pyqtSignal(str)          # version of the verified download
+
+    FIRST_CHECK_MS    = 3500
+    CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000  # every 4 hours
+    _TMP_PREFIX = "MedralUpdate-"
 
     def __init__(self, host: str, port: int, current_version: str) -> None:
         super().__init__()
         self._host    = host
         self._port    = port
         self._current = current_version
-        # queued connection → the dialog is created in the UI thread
-        self.update_available.connect(self._show_dialog)
+        self._pending: str | None = None    # path of the verified new exe
+        self._pending_version = ""
+        self._applied  = False              # guard against a double swap
+        self._checking = False              # one check at a time
 
-    def check_in_background(self) -> None:
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.CHECK_INTERVAL_MS)
+        self._timer.timeout.connect(self._check_in_background)
+
+    # ── public API ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """First check shortly after launch, then every CHECK_INTERVAL_MS."""
+        self._cleanup_stale_downloads()
+        QTimer.singleShot(self.FIRST_CHECK_MS, self._check_in_background)
+        self._timer.start()
+
+    def _cleanup_stale_downloads(self) -> None:
+        # Downloads left behind by a crash never get applied (each cycle
+        # uses a fresh random name) — sweep them so %TEMP% stays clean
+        try:
+            for p in Path(tempfile.gettempdir()).glob(self._TMP_PREFIX + "*"):
+                if self._pending and str(p) == self._pending:
+                    continue
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def apply_now(self) -> None:
+        """Swap the exe and restart the app (update banner clicked)."""
+        if self._spawn_swap_script(restart=True):
+            QApplication.quit()
+
+    def apply_on_exit(self) -> None:
+        """Swap the exe silently while quitting (wired to app.aboutToQuit)."""
+        self._spawn_swap_script(restart=False)
+
+    # ── check & download (daemon thread) ──────────────────────────────────
+
+    def _check_in_background(self) -> None:
+        # Skip when an update is already downloaded/applied or a check runs
+        if self._pending is not None or self._applied or self._checking:
+            return
+        self._checking = True
         threading.Thread(target=self._check, daemon=True).start()
 
     def _check(self) -> None:
-        import urllib.request, json as _json
         try:
-            with urllib.request.urlopen(
-                f"http://{self._host}:{self._port}/version", timeout=5
-            ) as r:
-                data = _json.loads(r.read())
-            latest    = data.get("client", "0.0.0")
-            available = data.get("client_available", False)
-            if available and _ver_tuple(latest) > _ver_tuple(self._current):
-                self.update_available.emit(
-                    self._current, latest,
-                    f"http://{self._host}:{self._port}/update/client",
-                )
-        except Exception:
-            pass
+            self._do_check()
+        except Exception as e:
+            # Silent by design: log to stdout, retry on the next cycle
+            print(f"[updater] check failed: {e}")
+        finally:
+            self._checking = False
 
-    def _show_dialog(self, current: str, latest: str, url: str) -> None:
-        UpdateDialog(current, latest, url).exec()
+    def _do_check(self) -> None:
+        import hashlib
+        import urllib.request
+
+        base = f"http://{self._host}:{self._port}"
+        with urllib.request.urlopen(f"{base}/version", timeout=10) as r:
+            data = json.loads(r.read())
+        latest = data.get("client", "0.0.0")
+        if not data.get("client_available"):
+            return
+        if _ver_tuple(latest) <= _ver_tuple(self._current):
+            return
+        # Servers older than this feature send no client_md5 — the hash
+        # verification is then skipped (size check below still applies).
+        expected_md5 = data.get("client_md5") or None
+
+        md5 = hashlib.md5()
+        tmp_file = tempfile.NamedTemporaryFile(
+            suffix=".exe", prefix=self._TMP_PREFIX, delete=False
+        )
+        tmp_path = tmp_file.name
+        try:
+            with tmp_file, urllib.request.urlopen(
+                f"{base}/update/client", timeout=60
+            ) as resp:
+                total = int(resp.headers.get("content-length", 0) or 0)
+                done  = 0
+                while chunk := resp.read(65536):
+                    tmp_file.write(chunk)
+                    md5.update(chunk)
+                    done += len(chunk)
+            if total and done != total:
+                raise ValueError(f"truncated download: {done} of {total} bytes")
+            if expected_md5 and md5.hexdigest().lower() != expected_md5.lower():
+                raise ValueError("md5 mismatch — corrupted download")
+        except Exception:
+            # Never keep a partial or corrupted file around
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        self._pending = tmp_path
+        self._pending_version = latest
+        print(f"[updater] version {latest} downloaded and verified: {tmp_path}")
+        self.update_ready.emit(latest)
+
+    # ── apply (bat swap script) ───────────────────────────────────────────
+
+    def _spawn_swap_script(self, restart: bool) -> bool:
+        """Write and launch the swap .bat. Returns True when the app should quit."""
+        if self._pending is None or self._applied:
+            return False
+        self._applied = True
+
+        if not getattr(sys, "frozen", False):
+            # Dev run: sys.executable is python.exe — never overwrite it
+            print(f"[updater] not frozen — swap skipped, update left at {self._pending}")
+            return False
+
+        exe = Path(sys.executable)
+        # goto-based retry: the running exe stays locked until this process
+        # actually exits, so the move may need a few attempts. If it never
+        # succeeds, the downloaded file is removed and the old exe keeps
+        # working — a half-swapped install is impossible with move /y.
+        lines = [
+            "@echo off",
+            "chcp 65001 >nul",
+            "set tries=0",
+            ":retry",
+            "ping 127.0.0.1 -n 3 >nul",
+            f'move /y "{self._pending}" "{exe}" >nul',
+            "if not errorlevel 1 goto done",
+            "set /a tries+=1",
+            "if %tries% lss 10 goto retry",
+            f'del "{self._pending}" >nul',
+            "goto cleanup",
+            ":done",
+        ]
+        if restart:
+            lines.append(f'start "" "{exe}"')
+        lines += [":cleanup", 'del "%~f0"']
+
+        bat = tempfile.mktemp(suffix=".bat")
+        Path(bat).write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+        subprocess.Popen(["cmd", "/c", bat], creationflags=subprocess.CREATE_NO_WINDOW)
+        return True
 
 
 # ── Discord login ─────────────────────────────────────────────────────────────
@@ -255,7 +292,7 @@ class _UpdateChecker(QObject):
 class LoginDialog(QDialog):
     """OAuth-вход через Discord: открывает браузер и поллит /auth/poll.
 
-    Поллинг — QTimer каждые 2 с + urllib в daemon-потоке (cf. _UpdateChecker),
+    Поллинг — QTimer каждые 2 с + urllib в daemon-потоке (в daemon-потоке),
     UI не блокируется. Таймаут 180 с. «Отмена» = reject → выход из приложения.
     """
 
@@ -684,8 +721,10 @@ def main() -> None:
 
     splash.closed.connect(_on_splash_done)
 
-    checker = _UpdateChecker(host, port, CLIENT_VERSION)   # keep a reference alive
-    QTimer.singleShot(3500, checker.check_in_background)
+    updater = _AutoUpdater(host, port, CLIENT_VERSION)     # keep a reference alive
+    window.set_updater(updater)                            # topbar update banner
+    app.aboutToQuit.connect(updater.apply_on_exit)         # silent swap on close
+    updater.start()
 
     ret = app.exec()
     client.stop()

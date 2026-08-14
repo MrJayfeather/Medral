@@ -39,6 +39,8 @@ class MainWindow(QMainWindow):
         self._login_handler = None
         self._login_active  = False
 
+        self._updater = None   # _AutoUpdater, wired via set_updater()
+
         self._intro_played = False   # one-shot cascade on first show
 
         self.setWindowTitle("Medral")
@@ -145,6 +147,22 @@ class MainWindow(QMainWindow):
         self._guild_combo.setMinimumWidth(160)
         self._guild_combo.currentIndexChanged.connect(self._on_guild_changed)
         lay.addWidget(self._guild_combo)
+
+        # Update banner — hidden until _AutoUpdater reports a verified build
+        self._update_btn = QPushButton("↓ Обновить")
+        self._update_btn.setObjectName("updateBanner")
+        self._update_btn.setFixedHeight(32)
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn.setStyleSheet(
+            "QPushButton { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 #6C63FF, stop:1 #A78BFA); border:none; border-radius:8px;"
+            " color:#ffffff; font-size:12px; font-weight:600; padding:0 14px; }"
+            "QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 #7B73FF, stop:1 #B79CFF); }"
+        )
+        self._update_btn.setVisible(False)
+        self._update_btn.clicked.connect(self._on_update_clicked)
+        lay.addWidget(self._update_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._dot = QLabel("●")
         self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
@@ -308,6 +326,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Error: {msg}", 6000)
         # a failed /search never emits search_results_ready — unfreeze the panel
         self.search_panel.reset_loading()
+
+    # ── auto-update banner ────────────────────────────────────────────────
+
+    def set_updater(self, updater) -> None:
+        """Wire an _AutoUpdater: the banner appears once an update is ready."""
+        self._updater = updater
+        updater.update_ready.connect(self._on_update_ready)
+
+    @pyqtSlot(str)
+    def _on_update_ready(self, version: str) -> None:
+        self._update_btn.setToolTip(
+            f"Версия {version} загружена — нажми для перезапуска"
+        )
+        if self._update_btn.isHidden():
+            self._update_btn.setVisible(True)
+            anim.fade_in(self._update_btn, ms=350, dy=8)
+
+    def _on_update_clicked(self) -> None:
+        if self._updater is not None:
+            self._updater.apply_now()
 
     # ── auth ──────────────────────────────────────────────────────────────
 
