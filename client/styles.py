@@ -315,6 +315,11 @@ QFrame#playerCard {{
     border-radius: 16px;
     border: 1px solid {BORDER};
 }}
+QFrame#searchDropdown {{
+    background-color: rgba(10, 10, 20, 0.97);
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
 QFrame#searchResultRow {{
     background-color: {SURFACE2};
     border-radius: 12px;

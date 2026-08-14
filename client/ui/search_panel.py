@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QLabel, QFrame, QSizePolicy,
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QEasingCurve, QRectF, QVariantAnimation
+from PyQt6.QtCore import pyqtSignal, Qt, QEasingCurve, QEvent, QRectF, QVariantAnimation
 from PyQt6.QtGui import QKeyEvent, QColor, QPainter, QPainterPath, QPen
 
 from ui.anim import glow, stagger
@@ -43,11 +43,15 @@ class SearchPanel(QWidget):
 
         root.addLayout(bar)
 
-        self._results_widget = QWidget()
+        # Results live in a floating dropdown OVER the player card instead of
+        # inside this panel's layout: five 54px rows do not fit between the
+        # search bar and the player at small window heights — the last row
+        # was getting clipped
+        self._results_widget = QFrame(self)
+        self._results_widget.setObjectName("searchDropdown")
         self._results_widget.setVisible(False)
-        self._results_widget.setStyleSheet("background: transparent;")
         r_lay = QVBoxLayout(self._results_widget)
-        r_lay.setContentsMargins(0, 2, 0, 0)
+        r_lay.setContentsMargins(8, 8, 8, 8)
         r_lay.setSpacing(4)
 
         self._result_rows: list[_ResultRow] = []
@@ -58,14 +62,15 @@ class SearchPanel(QWidget):
             r_lay.addWidget(row)
             self._result_rows.append(row)
 
-        root.addWidget(self._results_widget)
+        self._win_filter_installed = False
 
     # ── public ────────────────────────────────────────────────────────────
 
     def show_results(self, tracks: list[dict]) -> None:
-        has = bool(tracks)
         self._set_loading(False)
-        self._results_widget.setVisible(has)
+        if not tracks:
+            self._results_widget.hide()
+            return
         shown: list[_ResultRow] = []
         for i, row in enumerate(self._result_rows):
             if i < len(tracks):
@@ -74,15 +79,51 @@ class SearchPanel(QWidget):
                 shown.append(row)
             else:
                 row.setVisible(False)
-        if shown:
-            # Opacity-only cascade: rows are layout-managed, so animating
-            # their pos fights the layout (rows stuck shifted/clipped after
-            # a resize mid-animation — e.g. going fullscreen)
-            stagger(shown, step_ms=55, ms=320, dy=0)
+
+        # Float the dropdown at window level so it can overlap the player
+        win = self.window()
+        if self._results_widget.parent() is not win:
+            self._results_widget.setParent(win)
+        if not self._win_filter_installed:
+            win.installEventFilter(self)
+            self._win_filter_installed = True
+        self._position_dropdown()
+        self._results_widget.show()
+        self._results_widget.raise_()
+
+        # Opacity-only cascade: rows are layout-managed, so animating
+        # their pos fights the layout (rows stuck shifted/clipped after
+        # a resize mid-animation — e.g. going fullscreen)
+        stagger(shown, step_ms=55, ms=320, dy=0)
+
+    def _position_dropdown(self) -> None:
+        win = self.window()
+        if self._results_widget.parent() is not win:
+            return
+        top_left = self.mapTo(win, self._input.geometry().bottomLeft())
+        n = sum(1 for r in self._result_rows if r.isVisible())
+        height = 16 + n * 54 + max(0, n - 1) * 4     # margins + rows + spacing
+        self._results_widget.setGeometry(
+            top_left.x(), top_left.y() + 8, self.width(), height
+        )
+
+    def eventFilter(self, obj, ev) -> bool:
+        # Keep the floating dropdown glued to the search bar on window
+        # resize/move; it is positioned in window coordinates
+        if obj is self.window() and self._results_widget.isVisible():
+            if ev.type() in (QEvent.Type.Resize, QEvent.Type.Move):
+                self._position_dropdown()
+        return super().eventFilter(obj, ev)
+
+    def hideEvent(self, ev) -> None:
+        # e.g. switching to the settings page — the dropdown floats at
+        # window level and would linger over it otherwise
+        super().hideEvent(ev)
+        self._results_widget.hide()
 
     def clear(self) -> None:
         self._input.clear()
-        self._results_widget.setVisible(False)
+        self._results_widget.hide()
         self._set_loading(False)
 
     def set_loading(self) -> None:
