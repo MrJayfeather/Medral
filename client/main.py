@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from styles          import STYLESHEET
 from defaults        import DEFAULT_HOST, DEFAULT_PORT, SENTRY_DSN, SPLASH_VERSION
+from i18n            import tr, init_lang
 from network         import ApiClient
 from ui.main_window   import MainWindow
 from ui.splash_screen import SplashScreen
@@ -310,7 +311,7 @@ class LoginDialog(QDialog):
         self.result_user_id  = ""
         self.result_username = ""
 
-        self.setWindowTitle("Medral — вход")
+        self.setWindowTitle(tr("login_window_title"))
         self.setFixedSize(420, 300)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
 
@@ -332,14 +333,14 @@ class LoginDialog(QDialog):
         root.addWidget(logo)
         root.addSpacing(16)
 
-        sub = QLabel("Войди через Discord, чтобы управлять ботом")
+        sub = QLabel(tr("login_subtitle"))
         sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         sub.setWordWrap(True)
         sub.setStyleSheet("color:#7d8590; font-size:12px;")
         root.addWidget(sub)
         root.addSpacing(22)
 
-        self._login_btn = QPushButton("Войти через Discord")
+        self._login_btn = QPushButton(tr("login_button"))
         self._login_btn.setObjectName("primaryBtn")
         self._login_btn.setDefault(True)
         self._login_btn.clicked.connect(self._start_login)
@@ -348,7 +349,7 @@ class LoginDialog(QDialog):
 
         # Для тех, у кого нужный Discord-аккаунт в другом браузере:
         # копирует ссылку входа вместо открытия браузера по умолчанию.
-        self._copy_btn = QPushButton("Скопировать ссылку для другого браузера")
+        self._copy_btn = QPushButton(tr("login_copy_link"))
         self._copy_btn.setStyleSheet(
             "QPushButton { background:transparent; border:none; color:#6b6b8a;"
             " font-size:11px; text-decoration:underline; }"
@@ -365,7 +366,7 @@ class LoginDialog(QDialog):
         root.addWidget(self._status)
         root.addStretch()
 
-        cancel = QPushButton("Отмена")
+        cancel = QPushButton(tr("cancel"))
         cancel.clicked.connect(self.reject)
         root.addWidget(cancel)
 
@@ -377,14 +378,11 @@ class LoginDialog(QDialog):
         self._login_btn.setEnabled(False)
         url = f"http://{self._host}:{self._port}/auth/login?state={self._state}"
         if open_browser:
-            self._status.setText("Открыл браузер — подтверди вход и вернись сюда…")
+            self._status.setText(tr("login_browser_opened"))
             webbrowser.open(url)
         else:
             QApplication.clipboard().setText(url)
-            self._status.setText(
-                "Ссылка скопирована — вставь её в браузер с нужным "
-                "аккаунтом Discord и подтверди вход"
-            )
+            self._status.setText(tr("login_link_copied"))
         self._timer.start()
 
     def _start_login(self) -> None:
@@ -400,7 +398,7 @@ class LoginDialog(QDialog):
     def _poll_tick(self) -> None:
         if time.monotonic() >= self._deadline:
             self._timer.stop()
-            self._fail("Не дождался входа, попробуй ещё раз")
+            self._fail(tr("login_timeout"))
             return
         if self._polling:
             return
@@ -430,7 +428,7 @@ class LoginDialog(QDialog):
             return   # уже таймаут или отмена
         if data.get("status") == "expired":
             self._timer.stop()
-            self._fail("Сессия входа устарела — нажми кнопку ещё раз")
+            self._fail(tr("login_expired"))
             return
         if data.get("status") == "ok" and data.get("token"):
             self._timer.stop()
@@ -470,29 +468,29 @@ class ConnectDialog(QDialog):
         root.setContentsMargins(36, 36, 36, 36)
         root.setSpacing(0)
 
-        title = QLabel("Connect to server")
+        title = QLabel(tr("connect_dialog_title"))
         title.setObjectName("dialogTitle")
         root.addWidget(title)
         root.addSpacing(6)
 
-        sub = QLabel(f"Client v{CLIENT_VERSION} — Enter the address of your Medral server.")
+        sub = QLabel(tr("connect_dialog_sub", version=CLIENT_VERSION))
         sub.setStyleSheet("color:#7d8590; font-size:12px;")
         root.addWidget(sub)
         root.addSpacing(20)
 
         h_row = QHBoxLayout()
-        h_lbl = QLabel("Host")
+        h_lbl = QLabel(tr("host_label"))
         h_lbl.setFixedWidth(40)
         h_lbl.setStyleSheet("color:#7d8590;")
         self._host = QLineEdit(cfg.get("host", "127.0.0.1"))
-        self._host.setPlaceholderText("127.0.0.1  или  IP сервера")
+        self._host.setPlaceholderText(tr("host_placeholder"))
         h_row.addWidget(h_lbl)
         h_row.addWidget(self._host)
         root.addLayout(h_row)
         root.addSpacing(10)
 
         p_row = QHBoxLayout()
-        p_lbl = QLabel("Port")
+        p_lbl = QLabel(tr("port_label"))
         p_lbl.setFixedWidth(40)
         p_lbl.setStyleSheet("color:#7d8590;")
         self._port = QLineEdit(str(cfg.get("port", 8000)))
@@ -510,12 +508,12 @@ class ConnectDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        local_btn = QPushButton("Запустить локально")
-        local_btn.setToolTip("Запустить встроенный сервер на этом ПК")
+        local_btn = QPushButton(tr("run_locally"))
+        local_btn.setToolTip(tr("run_locally_tip"))
         local_btn.clicked.connect(self._on_local)
         btn_row.addWidget(local_btn)
 
-        connect = QPushButton("Подключиться")
+        connect = QPushButton(tr("connect_button"))
         connect.setObjectName("primaryBtn")
         connect.setDefault(True)
         connect.clicked.connect(self._on_connect)
@@ -525,10 +523,10 @@ class ConnectDialog(QDialog):
     def _on_local(self) -> None:
         host, port = "127.0.0.1", 8000
         if not _is_server_running(host, port):
-            self._hint.setText("Запускаю сервер…")
+            self._hint.setText(tr("server_starting"))
             QApplication.processEvents()
             if not _start_local_server():
-                self._hint.setText("Не удалось запустить сервер.")
+                self._hint.setText(tr("server_start_failed"))
                 return
             for _ in range(20):
                 QApplication.processEvents()
@@ -537,9 +535,9 @@ class ConnectDialog(QDialog):
                 if _is_server_running(host, port):
                     break
             else:
-                self._hint.setText("Сервер не ответил за 10 сек.")
+                self._hint.setText(tr("server_no_response"))
                 return
-        self._hint.setText("Сервер запущен!")
+        self._hint.setText(tr("server_started"))
         self.result_host = host
         self.result_port = port
         self.accept()
@@ -668,6 +666,7 @@ def main() -> None:
     app.setFont(QFont("DM Sans", 10))
 
     cfg   = _load_config()
+    init_lang(cfg.get("lang"))     # BEFORE any widget — tr() runs at build time
     host  = cfg.get("host", DEFAULT_HOST)
     port  = cfg.get("port", DEFAULT_PORT)
     token = cfg.get("token") or None

@@ -16,6 +16,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
+from i18n import tr
 from ui.anim import glow
 
 
@@ -75,7 +76,9 @@ def _rounded_pixmap(px: QPixmap, r: int = 12) -> QPixmap:
 
 
 _LOOP_ORDER = ["none", "all", "one"]        # click cycle: none → all → one → none
-_LOOP_TIPS  = {"none": "Loop: off", "all": "Loop: queue", "one": "Loop: track"}
+# i18n catalog keys — the module is imported before init_lang() runs, so the
+# dict holds keys and tr() is applied at the call sites, not at import time
+_LOOP_TIPS  = {"none": "loop_off", "all": "loop_queue", "one": "loop_track"}
 
 
 class _MarqueeLabel(QLabel):
@@ -520,7 +523,7 @@ class PlayerPanel(QFrame):
         meta.setSpacing(6)
         meta.addStretch()
 
-        self._title = _MarqueeLabel("Nothing playing")
+        self._title = _MarqueeLabel(tr("nothing_playing"))
         self._title.setObjectName("trackTitle")
         self._title.setMaximumWidth(420)
         meta.addWidget(self._title)
@@ -566,11 +569,11 @@ class PlayerPanel(QFrame):
         ctrl.setSpacing(8)
         ctrl.addStretch()
 
-        self._shuffle_btn = _IconButton("shuffle", "Shuffle queue")
+        self._shuffle_btn = _IconButton("shuffle", tr("shuffle_tip"))
         self._shuffle_btn.clicked.connect(self.shuffle_clicked)
         ctrl.addWidget(self._shuffle_btn)
 
-        self._prev_btn = _IconButton("previous", "Previous")
+        self._prev_btn = _IconButton("previous", tr("previous_tip"))
         self._prev_btn.clicked.connect(self.previous_clicked)
         ctrl.addWidget(self._prev_btn)
 
@@ -578,11 +581,11 @@ class PlayerPanel(QFrame):
         self._play_btn.clicked.connect(self.play_pause_clicked)
         ctrl.addWidget(self._play_btn)
 
-        self._skip_btn = _IconButton("next", "Skip")
+        self._skip_btn = _IconButton("next", tr("skip_tip"))
         self._skip_btn.clicked.connect(self.skip_clicked)
         ctrl.addWidget(self._skip_btn)
 
-        self._loop_btn = _IconButton("loop", _LOOP_TIPS["none"], idle_muted=True)
+        self._loop_btn = _IconButton("loop", tr(_LOOP_TIPS["none"]), idle_muted=True)
         self._loop_btn.clicked.connect(self._on_loop_click)
         ctrl.addWidget(self._loop_btn)
 
@@ -595,7 +598,7 @@ class PlayerPanel(QFrame):
         self._vol.setRange(0, 100)
         self._vol.setValue(50)
         self._vol.setFixedWidth(96)
-        self._vol.setToolTip("Volume")
+        self._vol.setToolTip(tr("volume_tip"))
         self._vol.valueChanged.connect(self._on_vol_changed)
         self._vol.sliderReleased.connect(self._on_vol_released)
         ctrl.addWidget(self._vol)
@@ -615,8 +618,8 @@ class PlayerPanel(QFrame):
             self._reset()
             return
 
-        title    = str(current.get("title") or "Unknown")
-        artist   = str(current.get("artist") or "Unknown")
+        title    = str(current.get("title") or tr("unknown"))
+        artist   = str(current.get("artist") or tr("unknown"))
         duration = int(current.get("duration") or 0)
         thumb    = current.get("thumbnail", "") or ""
 
@@ -664,7 +667,7 @@ class PlayerPanel(QFrame):
         self._duration   = 0
         self._position   = 0.0
         self._thumb_url  = ""
-        self._title.setText("Nothing playing")
+        self._title.setText(tr("nothing_playing"))
         self._artist.setText("")
         self._total.setText("0:00")
         self._elapsed.setText("0:00")
@@ -840,7 +843,7 @@ class PlayerPanel(QFrame):
             return
         self._loop_mode = mode
         self._loop_btn.set_mode(mode)    # loop/loop_one glyph + accent state
-        self._loop_btn.setToolTip(_LOOP_TIPS[mode])
+        self._loop_btn.setToolTip(tr(_LOOP_TIPS[mode]))
 
     def _on_loop_click(self) -> None:
         nxt = _LOOP_ORDER[(_LOOP_ORDER.index(self._loop_mode) + 1) % len(_LOOP_ORDER)]
@@ -1182,7 +1185,7 @@ class _PlayButton(QPushButton):
         super().__init__("▶", parent)
         self.setObjectName("playBtn")
         self.setFixedSize(56, 56)
-        self.setToolTip("Play / Pause")
+        self.setToolTip(tr("play_pause_tip"))
 
         self._scale = 1.0
         self._scale_anim = QVariantAnimation(self)

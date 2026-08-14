@@ -5,15 +5,18 @@ with logout and the client version now live on a stacked page inside the
 main window, with the aurora background visible behind a centered card.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QAbstractButton,
+    QLabel, QLineEdit, QPushButton, QAbstractButton, QApplication,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QVariantAnimation, QEasingCurve
 from PyQt6.QtGui import QPainter, QColor, QLinearGradient, QBrush
+
+from i18n import tr, get_lang, set_lang
 
 
 class ToggleSwitch(QAbstractButton):
@@ -133,6 +136,7 @@ class SettingsView(QWidget):
     connect_requested = pyqtSignal(str, int)   # host, port
     logout_requested  = pyqtSignal()
     settings_changed  = pyqtSignal(str, bool)  # key ("normalize"/"radio"), value
+    language_changed  = pyqtSignal(str)        # "ru" | "en"
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -182,7 +186,7 @@ class SettingsView(QWidget):
 
         # back button — top left
         top = QHBoxLayout()
-        back = QPushButton("←  Назад")
+        back = QPushButton(tr("back_button"))
         back.setObjectName("backBtn")
         back.setCursor(Qt.CursorShape.PointingHandCursor)
         back.clicked.connect(self.back_requested)
@@ -192,7 +196,7 @@ class SettingsView(QWidget):
 
         root.addStretch(1)
 
-        title = QLabel("Настройки")
+        title = QLabel(tr("settings_title"))
         title.setObjectName("settingsTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
@@ -206,22 +210,22 @@ class SettingsView(QWidget):
         c_lay.setContentsMargins(28, 24, 28, 24)
         c_lay.setSpacing(12)
 
-        srv_sec = QLabel("СЕРВЕР")
+        srv_sec = QLabel(tr("section_server"))
         srv_sec.setObjectName("sectionTitle")
         c_lay.addWidget(srv_sec)
 
         host_row = QHBoxLayout()
-        host_lbl = QLabel("Host")
+        host_lbl = QLabel(tr("host_label"))
         host_lbl.setFixedWidth(40)
         host_lbl.setStyleSheet("color:#6b6b8a; background:transparent;")
         self._host_edit = QLineEdit()
-        self._host_edit.setPlaceholderText("127.0.0.1  или  IP сервера")
+        self._host_edit.setPlaceholderText(tr("host_placeholder"))
         host_row.addWidget(host_lbl)
         host_row.addWidget(self._host_edit)
         c_lay.addLayout(host_row)
 
         port_row = QHBoxLayout()
-        port_lbl = QLabel("Port")
+        port_lbl = QLabel(tr("port_label"))
         port_lbl.setFixedWidth(40)
         port_lbl.setStyleSheet("color:#6b6b8a; background:transparent;")
         self._port_edit = QLineEdit()
@@ -232,7 +236,7 @@ class SettingsView(QWidget):
 
         c_lay.addSpacing(4)
 
-        connect_btn = QPushButton("Подключиться")
+        connect_btn = QPushButton(tr("connect_button"))
         connect_btn.setObjectName("primaryBtn")
         connect_btn.clicked.connect(self._on_connect_clicked)
         c_lay.addWidget(connect_btn)
@@ -244,20 +248,33 @@ class SettingsView(QWidget):
         c_lay.addWidget(divider)
         c_lay.addSpacing(8)
 
-        play_sec = QLabel("ВОСПРОИЗВЕДЕНИЕ")
+        play_sec = QLabel(tr("section_playback"))
         play_sec.setObjectName("sectionTitle")
         c_lay.addWidget(play_sec)
 
         self._normalize_toggle = self._add_toggle_row(
             c_lay, "normalize",
-            "Нормализация громкости",
-            "Выравнивает громкость треков",
+            tr("normalize_title"),
+            tr("normalize_sub"),
         )
         self._radio_toggle = self._add_toggle_row(
             c_lay, "radio",
-            "Радио-режим",
-            "Когда очередь кончается, бот продолжает похожими треками",
+            tr("radio_title"),
+            tr("radio_sub"),
         )
+
+        c_lay.addSpacing(8)
+        divider3 = QFrame()
+        divider3.setObjectName("divider")
+        divider3.setFixedHeight(1)
+        c_lay.addWidget(divider3)
+        c_lay.addSpacing(8)
+
+        app_sec = QLabel(tr("section_app"))
+        app_sec.setObjectName("sectionTitle")
+        c_lay.addWidget(app_sec)
+
+        self._build_language_row(c_lay)
 
         c_lay.addSpacing(8)
         divider2 = QFrame()
@@ -266,7 +283,7 @@ class SettingsView(QWidget):
         c_lay.addWidget(divider2)
         c_lay.addSpacing(8)
 
-        acc_sec = QLabel("АККАУНТ")
+        acc_sec = QLabel(tr("section_account"))
         acc_sec.setObjectName("sectionTitle")
         c_lay.addWidget(acc_sec)
 
@@ -274,7 +291,7 @@ class SettingsView(QWidget):
         self._user_lbl = QLabel("—")
         self._user_lbl.setStyleSheet("color:#e8e8f5; background:transparent;")
         acc_row.addWidget(self._user_lbl, 1)
-        logout_btn = QPushButton("Выйти из аккаунта")
+        logout_btn = QPushButton(tr("logout_button"))
         logout_btn.setObjectName("disconnectBtn")
         logout_btn.clicked.connect(self.logout_requested)
         acc_row.addWidget(logout_btn, 0)
@@ -288,10 +305,82 @@ class SettingsView(QWidget):
 
         root.addStretch(2)
 
-        ver = QLabel(f"Medral Client v{_read_version()}")
+        ver = QLabel(tr("client_version", version=_read_version()))
         ver.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         ver.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
         root.addWidget(ver)
+
+    def _build_language_row(self, layout: QVBoxLayout) -> None:
+        """«Язык / Language» row: two segment buttons + restart-to-apply UI.
+
+        The label is bilingual on purpose (findable in either language) and
+        the segment captions are native language names.  Switching emits
+        language_changed(lang); the new language applies after a restart —
+        the hint says so, and a frozen build offers a restart button.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        t_lbl = QLabel(tr("lang_label"))
+        t_lbl.setStyleSheet("color:#e8e8f5; background:transparent;")
+        self._lang_hint = QLabel(tr("lang_restart_hint"))
+        self._lang_hint.setStyleSheet(
+            "color:#6b6b8a; font-size:11px; background:transparent;"
+        )
+        self._lang_hint.setWordWrap(True)
+        text_col.addWidget(t_lbl)
+        text_col.addWidget(self._lang_hint)
+        row.addLayout(text_col, 1)
+
+        seg_style = (
+            "QPushButton {{ background:#16162a; border:1px solid #2a2a40;"
+            " color:#6b6b8a; font-size:12px; padding:4px 14px;{corners} }}"
+            "QPushButton:hover {{ color:#e8e8f5; }}"
+            "QPushButton:checked {{ background:rgba(108,99,255,0.25);"
+            " color:#e8e8f5; border-color:#6C63FF; }}"
+        )
+        seg = QHBoxLayout()
+        seg.setSpacing(0)
+        self._lang_ru = QPushButton(tr("lang_russian"))
+        self._lang_ru.setStyleSheet(seg_style.format(
+            corners=" border-top-left-radius:8px; border-bottom-left-radius:8px;"
+                    " border-top-right-radius:0; border-bottom-right-radius:0;"
+                    " border-right:none;"
+        ))
+        self._lang_en = QPushButton(tr("lang_english"))
+        self._lang_en.setStyleSheet(seg_style.format(
+            corners=" border-top-right-radius:8px; border-bottom-right-radius:8px;"
+                    " border-top-left-radius:0; border-bottom-left-radius:0;"
+        ))
+        for btn in (self._lang_ru, self._lang_en):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(28)
+            seg.addWidget(btn)
+        (self._lang_ru if get_lang() == "ru" else self._lang_en).setChecked(True)
+        self._lang_ru.clicked.connect(lambda: self._on_lang_clicked("ru"))
+        self._lang_en.clicked.connect(lambda: self._on_lang_clicked("en"))
+        row.addLayout(seg, 0)
+
+        # restart button: frozen builds only, appears after a switch
+        # (apply_on_exit still runs on QApplication.quit — a pending
+        # client update is applied by the swap script as usual)
+        self._restart_btn = QPushButton(tr("restart_now"))
+        self._restart_btn.setStyleSheet(
+            "QPushButton { background:rgba(108,99,255,0.18);"
+            " border:1px solid #6C63FF; border-radius:8px; color:#e8e8f5;"
+            " font-size:12px; padding:4px 12px; }"
+            "QPushButton:hover { background:rgba(108,99,255,0.30); }"
+        )
+        self._restart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restart_btn.setFixedHeight(28)
+        self._restart_btn.setVisible(False)
+        self._restart_btn.clicked.connect(self._on_restart_clicked)
+        row.addWidget(self._restart_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        layout.addLayout(row)
 
     def _add_toggle_row(
         self, layout: QVBoxLayout, key: str, title: str, subtitle: str,
@@ -357,3 +446,21 @@ class SettingsView(QWidget):
         except ValueError:
             port = self._fallback_port
         self.connect_requested.emit(host, port)
+
+    def _on_lang_clicked(self, lang: str) -> None:
+        # manual exclusivity — clicking the checked segment must not
+        # uncheck it (QPushButton toggles on every click)
+        self._lang_ru.setChecked(lang == "ru")
+        self._lang_en.setChecked(lang == "en")
+        if lang == get_lang():
+            return
+        set_lang(lang)   # runtime default for future widgets; UI — after restart
+        if getattr(sys, "frozen", False):
+            self._restart_btn.setVisible(True)
+        self.language_changed.emit(lang)
+
+    def _on_restart_clicked(self) -> None:
+        # frozen only (the button is hidden otherwise): relaunch the exe
+        # and quit — aboutToQuit → apply_on_exit runs as usual
+        subprocess.Popen([sys.executable])
+        QApplication.quit()

@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt, QEasingCurve, QEvent, QRectF, QVariantAnimation
 from PyQt6.QtGui import QKeyEvent, QColor, QPainter, QPainterPath, QPen
 
+from i18n import tr
 from ui.anim import glow, stagger
 from ui.elide import ElideLabel
 
@@ -29,13 +30,11 @@ class SearchPanel(QWidget):
         bar.setSpacing(8)
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText(
-            "Search YouTube — song, artist, or paste a YouTube/Spotify URL…"
-        )
+        self._input.setPlaceholderText(tr("search_placeholder"))
         self._input.returnPressed.connect(self._on_submit)
         bar.addWidget(self._input, 1)
 
-        self._btn = QPushButton("Search")
+        self._btn = QPushButton(tr("search_button"))
         self._btn.setObjectName("searchBtn")
         self._btn.setFixedWidth(88)
         self._btn.clicked.connect(self._on_submit)
@@ -157,7 +156,7 @@ class SearchPanel(QWidget):
     def _set_loading(self, loading: bool) -> None:
         # Only the button reflects loading — a disabled (greyed) input reads
         # as "the app froze" during slow searches
-        self._btn.setText("…" if loading else "Search")
+        self._btn.setText("…" if loading else tr("search_button"))
         self._btn.setEnabled(not loading)
 
     # ── slots ─────────────────────────────────────────────────────────────
@@ -259,15 +258,15 @@ class _ResultRow(QFrame):
         btn = _GlowButton("")   # glyph is painted, not a text character
         btn.setObjectName("resultPlayBtn")
         btn.setFixedSize(32, 32)
-        btn.setToolTip("Add to queue")
+        btn.setToolTip(tr("add_to_queue_tip"))
         btn.clicked.connect(lambda: self.play_clicked.emit(self._url))
         # stretch 0 — the button keeps its fixed 32x32 and is never squeezed
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_track(self, track: dict) -> None:
         self._url = track.get("webpage_url", "")
-        title  = str(track.get("title") or "Unknown Title")
-        artist = str(track.get("artist") or "Unknown Artist")
+        title  = str(track.get("title") or tr("unknown_title"))
+        artist = str(track.get("artist") or tr("unknown_artist"))
         dur    = int(track.get("duration") or 0)
         m, s   = divmod(dur, 60)
 

@@ -9,6 +9,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QAction
 
+from i18n import tr, tr_n
 from ui.anim import stagger
 from ui.elide import ElideLabel
 
@@ -32,7 +33,7 @@ class QueuePanel(QWidget):
         root.setSpacing(6)
 
         hdr = QHBoxLayout()
-        title = QLabel("QUEUE")
+        title = QLabel(tr("queue_header"))
         title.setObjectName("sectionTitle")
         self._count = QLabel("")
         self._count.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
@@ -69,7 +70,7 @@ class QueuePanel(QWidget):
             if rows:
                 stagger(rows, step_ms=45, ms=300, dy=0)
         n = len(self._tracks)
-        self._count.setText(f"{n} track{'s' if n != 1 else ''}" if n else "")
+        self._count.setText(f"{n} {tr_n('track', n)}" if n else "")
 
     # ── private ───────────────────────────────────────────────────────────
 
@@ -118,9 +119,9 @@ class QueuePanel(QWidget):
             return
         row = self._list.row(item)
         menu = QMenu(self)
-        act_remove = menu.addAction("Remove from queue")
-        act_up     = menu.addAction("Move up")
-        act_down   = menu.addAction("Move down")
+        act_remove = menu.addAction(tr("remove_from_queue"))
+        act_up     = menu.addAction(tr("move_up"))
+        act_down   = menu.addAction(tr("move_down"))
 
         act_up.setEnabled(row > 0)
         act_down.setEnabled(row < self._list.count() - 1)
@@ -159,7 +160,7 @@ class _QueueRow(QWidget):
         info = QVBoxLayout()
         info.setSpacing(2)
 
-        title  = str(track.get("title") or "Unknown")
+        title  = str(track.get("title") or tr("unknown"))
         artist = str(track.get("artist") or "")
         dur    = int(track.get("duration") or 0)
         m, s   = divmod(dur, 60)

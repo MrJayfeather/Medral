@@ -9,6 +9,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QFont, QColor, QLinearGradient, QPainter
 
+from i18n import tr
+
 _ACTIVE_ROLE = Qt.ItemDataRole.UserRole + 1   # bot connected to this channel
 _MEMBER_ROLE = Qt.ItemDataRole.UserRole + 2   # row is a channel member (non-interactive)
 
@@ -42,7 +44,7 @@ class ChannelPanel(QFrame):
         header.setFixedHeight(52)
         h_lay = QHBoxLayout(header)
         h_lay.setContentsMargins(16, 0, 16, 0)
-        self._server_label = QLabel("NO SERVER")
+        self._server_label = QLabel(tr("no_server_header"))
         self._server_label.setObjectName("sectionTitle")
         h_lay.addWidget(self._server_label)
         root.addWidget(header)
@@ -54,7 +56,7 @@ class ChannelPanel(QFrame):
         sec.setFixedHeight(32)
         s_lay = QHBoxLayout(sec)
         s_lay.setContentsMargins(16, 0, 16, 0)
-        lbl = QLabel("VOICE CHANNELS")
+        lbl = QLabel(tr("voice_channels_header"))
         lbl.setObjectName("sectionTitle")
         s_lay.addWidget(lbl)
         root.addWidget(sec)
@@ -84,7 +86,7 @@ class ChannelPanel(QFrame):
         btn_wrap.setFixedHeight(60)
         b_lay = QVBoxLayout(btn_wrap)
         b_lay.setContentsMargins(12, 10, 12, 10)
-        self._action_btn = QPushButton("Connect Bot")
+        self._action_btn = QPushButton(tr("connect_bot"))
         self._action_btn.setObjectName("connectBtn")
         self._action_btn.setEnabled(False)
         self._action_btn.clicked.connect(self._on_action)
@@ -184,7 +186,7 @@ class ChannelPanel(QFrame):
         name = "disconnectBtn" if connected else "connectBtn"
         if self._action_btn.objectName() == name:
             return   # state unchanged — no repolish, no animation
-        self._action_btn.setText("Disconnect Bot" if connected else "Connect Bot")
+        self._action_btn.setText(tr("disconnect_bot") if connected else tr("connect_bot"))
         self._action_btn.setObjectName(name)
         self._action_btn.style().unpolish(self._action_btn)
         self._action_btn.style().polish(self._action_btn)

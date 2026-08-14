@@ -8,6 +8,7 @@ from PyQt6.QtCore import (
     QParallelAnimationGroup, QPropertyAnimation,
 )
 
+from i18n import tr
 from network import ApiClient
 from ui import anim
 from ui.background_widget import BackgroundWidget
@@ -120,7 +121,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._settings)
         root.addWidget(self._stack, 1)
 
-        self.statusBar().showMessage("Connecting…")
+        self.statusBar().showMessage(tr("status_connecting"))
 
     def _make_top_bar(self) -> QFrame:
         bar = QFrame()
@@ -138,18 +139,18 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        srv = QLabel("Server:")
+        srv = QLabel(tr("server_combo_label"))
         srv.setStyleSheet("color:#6b6b8a; background:transparent;")
         lay.addWidget(srv)
 
         self._guild_combo = QComboBox()
-        self._guild_combo.setPlaceholderText("No server")
+        self._guild_combo.setPlaceholderText(tr("no_server"))
         self._guild_combo.setMinimumWidth(160)
         self._guild_combo.currentIndexChanged.connect(self._on_guild_changed)
         lay.addWidget(self._guild_combo)
 
         # Update banner — hidden until _AutoUpdater reports a verified build
-        self._update_btn = QPushButton("↓ Обновить")
+        self._update_btn = QPushButton(tr("update_button"))
         self._update_btn.setObjectName("updateBanner")
         self._update_btn.setFixedHeight(32)
         self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -166,7 +167,7 @@ class MainWindow(QMainWindow):
 
         self._dot = QLabel("●")
         self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
-        self._dot.setToolTip("WebSocket disconnected")
+        self._dot.setToolTip(tr("ws_disconnected_tip"))
         self._dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -178,7 +179,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._user_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         change_btn = QPushButton("⚙")
-        change_btn.setToolTip("Настройки")
+        change_btn.setToolTip(tr("settings_tooltip"))
         change_btn.setFixedSize(32, 32)
         change_btn.setStyleSheet(
             "QPushButton { background:#16162a; border:1px solid #2a2a40;"
@@ -206,6 +207,7 @@ class MainWindow(QMainWindow):
         self._settings.connect_requested.connect(self._on_settings_connect)
         self._settings.logout_requested.connect(self._on_settings_logout)
         self._settings.settings_changed.connect(self._on_playback_setting)
+        self._settings.language_changed.connect(self._on_language_changed)
 
         self.ch_panel.join_requested.connect(
             lambda g, c: self.client.join(g, c)
@@ -313,21 +315,21 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_ws_up(self) -> None:
         self._dot.setStyleSheet("color:#34d399; font-size:14px; background:transparent;")
-        self._dot.setToolTip("Connected")
+        self._dot.setToolTip(tr("status_connected"))
         anim.pulse(self._dot, ms=2000, low=0.35)   # soft breathing while live
-        self.statusBar().showMessage("Connected", 3000)
+        self.statusBar().showMessage(tr("status_connected"), 3000)
         self.client.fetch_guilds()
 
     @pyqtSlot()
     def _on_ws_down(self) -> None:
         anim.stop_pulse(self._dot)
         self._dot.setStyleSheet("color:#f87171; font-size:14px; background:transparent;")
-        self._dot.setToolTip("Disconnected — retrying…")
-        self.statusBar().showMessage("Disconnected — reconnecting…")
+        self._dot.setToolTip(tr("ws_retrying_tip"))
+        self.statusBar().showMessage(tr("status_disconnected"))
 
     @pyqtSlot(str)
     def _on_error(self, msg: str) -> None:
-        self.statusBar().showMessage(f"Error: {msg}", 6000)
+        self.statusBar().showMessage(tr("status_error", msg=msg), 6000)
         # a failed /search never emits search_results_ready — unfreeze the panel
         self.search_panel.reset_loading()
 
@@ -340,9 +342,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_update_ready(self, version: str) -> None:
-        self._update_btn.setToolTip(
-            f"Версия {version} загружена — нажми для перезапуска"
-        )
+        self._update_btn.setToolTip(tr("update_ready_tip", version=version))
         if self._update_btn.isHidden():
             self._update_btn.setVisible(True)
             anim.fade_in(self._update_btn, ms=350, dy=8)
@@ -415,7 +415,7 @@ class MainWindow(QMainWindow):
             return
         if _is_playlist_url(url):
             self.client.play_playlist(self._guild_id, url)
-            self.statusBar().showMessage("Загружаю плейлист…", 8000)
+            self.statusBar().showMessage(tr("status_loading_playlist"), 8000)
         else:
             self.client.play(self._guild_id, url)
 
@@ -486,13 +486,31 @@ class MainWindow(QMainWindow):
         self._guilds   = []
         self._state    = {}
         self.client.set_server(host, port)
-        self.statusBar().showMessage(f"Connecting to {host}:{port}…")
+        self.statusBar().showMessage(tr("status_connecting_to", host=host, port=port))
         self._close_settings()
 
     @pyqtSlot()
     def _on_settings_logout(self) -> None:
         self._close_settings()
         self._do_logout()
+
+    @pyqtSlot(str)
+    def _on_language_changed(self, lang: str) -> None:
+        # persist only — the UI itself applies the language after a restart
+        import json
+        from pathlib import Path
+
+        cfg_file = Path.home() / ".medral" / "config.json"
+        try:
+            cfg = json.loads(cfg_file.read_text())
+        except Exception:
+            cfg = {}
+        cfg["lang"] = lang
+        try:
+            cfg_file.parent.mkdir(parents=True, exist_ok=True)
+            cfg_file.write_text(json.dumps(cfg, indent=2))
+        except Exception:
+            pass
 
     # ── intro cascade ─────────────────────────────────────────────────────
 
