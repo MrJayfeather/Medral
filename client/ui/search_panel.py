@@ -43,12 +43,18 @@ class SearchPanel(QWidget):
 
         root.addLayout(bar)
 
-        # Results live in a floating dropdown OVER the player card instead of
-        # inside this panel's layout: five 54px rows do not fit between the
-        # search bar and the player at small window heights — the last row
-        # was getting clipped
-        self._results_widget = QFrame(self)
+        # Results live in a floating frameless Tool window (the QCompleter
+        # approach): a plain child of the main window gets restacked under
+        # the central widget, and inside the panel's layout five rows do not
+        # fit above the player. A Tool window always stays on top of its
+        # parent window and never fights the layout.
+        self._results_widget = QFrame(
+            self.window(),
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
+        )
         self._results_widget.setObjectName("searchDropdown")
+        self._results_widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._results_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._results_widget.setVisible(False)
         r_lay = QVBoxLayout(self._results_widget)
         r_lay.setContentsMargins(8, 8, 8, 8)
@@ -80,10 +86,11 @@ class SearchPanel(QWidget):
             else:
                 row.setVisible(False)
 
-        # Float the dropdown at window level so it can overlap the player
         win = self.window()
-        if self._results_widget.parent() is not win:
-            self._results_widget.setParent(win)
+        if self._results_widget.parentWidget() is not win:
+            self._results_widget.setParent(
+                win, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+            )
         if not self._win_filter_installed:
             win.installEventFilter(self)
             self._win_filter_installed = True
@@ -97,10 +104,8 @@ class SearchPanel(QWidget):
         stagger(shown, step_ms=55, ms=320, dy=0)
 
     def _position_dropdown(self) -> None:
-        win = self.window()
-        if self._results_widget.parent() is not win:
-            return
-        top_left = self.mapTo(win, self._input.geometry().bottomLeft())
+        # The dropdown is a top-level Tool window — global coordinates
+        top_left = self.mapToGlobal(self._input.geometry().bottomLeft())
         n = sum(1 for r in self._result_rows if r.isVisible())
         height = 16 + n * 54 + max(0, n - 1) * 4     # margins + rows + spacing
         self._results_widget.setGeometry(
@@ -108,11 +113,16 @@ class SearchPanel(QWidget):
         )
 
     def eventFilter(self, obj, ev) -> bool:
-        # Keep the floating dropdown glued to the search bar on window
-        # resize/move; it is positioned in window coordinates
         if obj is self.window() and self._results_widget.isVisible():
+            # Glued to the search bar while the window moves or resizes
             if ev.type() in (QEvent.Type.Resize, QEvent.Type.Move):
                 self._position_dropdown()
+            # A Tool window floats above OTHER apps too — hide it when the
+            # main window is minimized or loses the foreground
+            elif ev.type() in (QEvent.Type.WindowStateChange,
+                               QEvent.Type.WindowDeactivate):
+                if self.window().isMinimized() or not self.window().isActiveWindow():
+                    self._results_widget.hide()
         return super().eventFilter(obj, ev)
 
     def hideEvent(self, ev) -> None:
@@ -134,9 +144,10 @@ class SearchPanel(QWidget):
         self._set_loading(False)
 
     def _set_loading(self, loading: bool) -> None:
+        # Only the button reflects loading — a disabled (greyed) input reads
+        # as "the app froze" during slow searches
         self._btn.setText("…" if loading else "Search")
         self._btn.setEnabled(not loading)
-        self._input.setEnabled(not loading)
 
     # ── slots ─────────────────────────────────────────────────────────────
 
