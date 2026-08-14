@@ -69,6 +69,9 @@ class SearchPanel(QWidget):
             self._result_rows.append(row)
 
         self._win_filter_installed = False
+        # Esc in the input (or inside the dropdown) hides the results
+        self._input.installEventFilter(self)
+        self._results_widget.installEventFilter(self)
 
     # ── public ────────────────────────────────────────────────────────────
 
@@ -113,6 +116,14 @@ class SearchPanel(QWidget):
         )
 
     def eventFilter(self, obj, ev) -> bool:
+        # Esc closes the results (unhandled keys from the row buttons bubble
+        # up to the dropdown frame, so this covers focus inside it too)
+        if (ev.type() == QEvent.Type.KeyPress
+                and obj in (self._input, self._results_widget)
+                and ev.key() == Qt.Key.Key_Escape
+                and self._results_widget.isVisible()):
+            self._results_widget.hide()
+            return True
         if obj is self.window() and self._results_widget.isVisible():
             # Glued to the search bar while the window moves or resizes
             if ev.type() in (QEvent.Type.Resize, QEvent.Type.Move):
