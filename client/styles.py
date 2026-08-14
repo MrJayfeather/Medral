@@ -185,8 +185,10 @@ QPushButton#resultPlayBtn {{
     background-color: transparent;
     border: 1px solid {BORDER};
     border-radius: 16px;
-    min-width: 32px;
-    min-height: 32px;
+    /* no min sizes and zero padding: the inherited QPushButton padding
+       (6px 16px) inflated the 32x32 fixed-size button into a wide pill
+       and pushed the glyph off-center */
+    padding: 0px;
     color: {ACCENT2};
     font-size: 12px;
 }}
