@@ -19,6 +19,30 @@ import bot as music_bot
 
 load_dotenv()
 
+# Error tracking (no-op without SENTRY_DSN in .env). Catches FastAPI 500s,
+# unhandled asyncio task exceptions (keepalive/reconnect/py-cord callbacks)
+# and error-level logs. traces_sample_rate=0: errors only, no perf quota.
+_SENTRY_DSN = os.getenv("SENTRY_DSN")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+
+        def _read_release() -> str:
+            try:
+                return (Path(__file__).resolve().parent.parent / "version.txt").read_text().strip()
+            except OSError:
+                return "unknown"
+
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            environment="server",
+            release=_read_release(),
+            traces_sample_rate=0,
+            send_default_pii=False,
+        )
+    except Exception as exc:
+        print(f"[sentry] init failed: {exc}")
+
 # Session tokens travel in the WS query string; uvicorn's access log would
 # otherwise persist them into journalctl for their whole 30-day lifetime.
 import logging as _logging

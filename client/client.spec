@@ -5,6 +5,7 @@
 # Build from project root:  pyinstaller client\client.spec
 #
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 ROOT = Path(SPECPATH).parent   # SPECPATH = client/, ROOT = project root
@@ -30,6 +31,8 @@ a = Analysis(
         # ---- client ----
         'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtCore',
         'PyQt6.QtGui', 'PyQt6.QtNetwork', 'PyQt6.sip',
+        # sentry lazy-loads its integrations — collect them all
+        *collect_submodules('sentry_sdk'),
         'aiohttp', 'aiohttp.connector', 'aiohttp.client',
         'websockets', 'websockets.legacy', 'websockets.legacy.client',
         # ---- server (bot modules) ----

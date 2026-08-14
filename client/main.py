@@ -50,7 +50,7 @@ from PyQt6.QtGui import QFont
 sys.path.insert(0, str(Path(__file__).parent))
 
 from styles          import STYLESHEET
-from defaults        import DEFAULT_HOST, DEFAULT_PORT, SPLASH_VERSION
+from defaults        import DEFAULT_HOST, DEFAULT_PORT, SENTRY_DSN, SPLASH_VERSION
 from network         import ApiClient
 from ui.main_window   import MainWindow
 from ui.splash_screen import SplashScreen
@@ -573,11 +573,29 @@ def _play_startup_sound() -> None:
         pass
 
 
+def _init_sentry() -> None:
+    """Crash reporting for the client (no-op with an empty SENTRY_DSN)."""
+    if not SENTRY_DSN:
+        return
+    try:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment="client",
+            release=CLIENT_VERSION,
+            traces_sample_rate=0,
+            send_default_pii=False,
+        )
+    except Exception:
+        pass
+
+
 def _install_excepthook() -> None:
     """Log unhandled slot exceptions instead of letting PyQt6 abort the app.
 
     Without a custom excepthook PyQt6 calls qFatal() on any Python exception
     that escapes a slot — the process dies with 0xc0000409 and no trace.
+    Errors are also forwarded to Sentry when it is configured.
     """
     import traceback
     from datetime import datetime
@@ -591,12 +609,19 @@ def _install_excepthook() -> None:
                 traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
         except Exception:
             pass
+        if SENTRY_DSN:
+            try:
+                import sentry_sdk
+                sentry_sdk.capture_exception(exc_value)
+            except Exception:
+                pass
         traceback.print_exception(exc_type, exc_value, exc_tb)
 
     sys.excepthook = hook
 
 
 def main() -> None:
+    _init_sentry()
     _install_excepthook()
     app = QApplication(sys.argv)
     app.setApplicationName("Medral")
