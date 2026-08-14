@@ -7,4 +7,4 @@ SPLASH_VERSION = "v2"
 
 # Sentry error tracking. A DSN is a write-only key — safe to embed in the
 # exe. Empty string disables Sentry entirely.
-SENTRY_DSN = ""
+SENTRY_DSN = "https://c9f03c090d48153ce6ebad873a63de92@o4511906417344512.ingest.de.sentry.io/4511906433663056"
