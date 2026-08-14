@@ -170,7 +170,14 @@ class _QueueRow(QWidget):
         t_lbl.setStyleSheet("font-size:13px; font-weight:500; color:#e8e8f5; background:transparent;")
         info.addWidget(t_lbl)
 
-        sub = ElideLabel(f"{artist}  •  {m}:{s:02d}")
+        sub_text = f"{artist}  •  {m}:{s:02d}"
+        # Non-YouTube tracks are labelled with their source
+        source = track.get("source")
+        if source == "soundcloud":
+            sub_text += "  •  SoundCloud"
+        elif source == "spotify":
+            sub_text += "  •  Spotify"
+        sub = ElideLabel(sub_text)
         sub.setStyleSheet("font-size:11px; color:#6b6b8a; background:transparent;")
         info.addWidget(sub)
 

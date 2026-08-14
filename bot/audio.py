@@ -53,6 +53,10 @@ class Track:
     artist: str
     duration: int       # seconds
     thumbnail: str
+    # Lazily-resolved tracks (e.g. from Spotify metadata) have an empty
+    # webpage_url and a text query to search on YouTube/SoundCloud instead.
+    search_query: str = ""
+    source: str = "youtube"
 
     def to_dict(self) -> dict:
         return {
@@ -61,6 +65,7 @@ class Track:
             "artist": self.artist,
             "duration": self.duration,
             "thumbnail": self.thumbnail,
+            "source": self.source,
         }
 
 
@@ -90,20 +95,17 @@ def _entry_to_track(entry: dict) -> Track:
 
 def is_playlist_url(query: str) -> bool:
     """True for URLs that reference a whole playlist rather than a single track."""
+    if "open.spotify.com" in query:
+        # Spotify URLs are routed through the spotify module before this
+        # check — never let /playlist|/album Spotify links reach yt-dlp.
+        return False
     return (
         query.startswith("http")
         and ("list=" in query or "/playlist" in query or "/album" in query)
     )
 
 
-async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
-    if query.startswith("http://") or query.startswith("https://"):
-        search_query = query
-        opts = YTDL_OPTS          # URL — нужна полная инфа
-    else:
-        search_query = f"ytsearch{max_results}:{query}"
-        opts = YTDL_SEARCH_OPTS   # текстовый запрос — плоский, быстрый
-
+async def _run_search(opts: dict, search_query: str, max_results: int) -> List[Track]:
     try:
         data = await _yt_extract(opts, search_query)
     except Exception as exc:
@@ -119,10 +121,43 @@ async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
         if not e:
             continue
         try:
-            tracks.append(_entry_to_track(e))
+            t = _entry_to_track(e)
         except Exception as exc:
             print(f"[search] entry parse error: {exc}")
+            continue
+        if not t.thumbnail:
+            # Flat entries carry a "thumbnails" list instead of "thumbnail"
+            thumbs = e.get("thumbnails") or []
+            if thumbs:
+                t.thumbnail = thumbs[-1].get("url", "")
+        tracks.append(t)
     return tracks[:max_results]
+
+
+async def search_tracks(query: str, max_results: int = 5) -> List[Track]:
+    is_url = query.startswith("http://") or query.startswith("https://")
+    if is_url:
+        search_query = query
+        opts = YTDL_OPTS          # URL — нужна полная инфа
+    else:
+        search_query = f"ytsearch{max_results}:{query}"
+        opts = YTDL_SEARCH_OPTS   # текстовый запрос — плоский, быстрый
+
+    tracks = await _run_search(opts, search_query, max_results)
+
+    if is_url and "soundcloud.com" in query:
+        # Correct the source label for directly pasted SoundCloud links
+        for t in tracks:
+            t.source = "soundcloud"
+
+    if not tracks and not is_url:
+        # Zero YouTube hits for a text query — retry the search on SoundCloud
+        tracks = await _run_search(
+            YTDL_SEARCH_OPTS, f"scsearch{max_results}:{query}", max_results
+        )
+        for t in tracks:
+            t.source = "soundcloud"
+    return tracks
 
 
 async def load_playlist(url: str, max_tracks: int = 100) -> List[Track]:
@@ -165,7 +200,59 @@ async def load_playlist(url: str, max_tracks: int = 100) -> List[Track]:
     return tracks
 
 
+async def _resolve_lazy_track(track: Track) -> str:
+    """Resolve a lazily-defined track (Spotify metadata) to a stream URL.
+
+    Full extraction of "ytsearch1:{query}" first, SoundCloud as fallback.
+    On success the track is mutated in place (webpage_url, thumbnail if it
+    was empty, source set to the service that actually matched) and the
+    direct stream URL is returned. Raises if neither service has a match —
+    play_next() then skips the track like any other dead entry.
+    """
+    for prefix, source in (("ytsearch1:", "youtube"), ("scsearch1:", "soundcloud")):
+        try:
+            data = await _yt_extract(YTDL_OPTS, f"{prefix}{track.search_query}")
+        except Exception as exc:
+            print(f"[audio] lazy resolve via {source} failed "
+                  f"for {track.search_query!r}: {exc}")
+            continue
+
+        entry = None
+        if data:
+            if "entries" in data:
+                entries = data.get("entries") or []
+                entry = entries[0] if entries else None
+            else:
+                entry = data
+        if not entry:
+            continue
+
+        stream_url = entry.get("url", "")
+        if not stream_url:
+            continue
+
+        # webpage_url keys the local audio cache — an empty one would make
+        # every lazy track collide on md5("") in the cache dir
+        resolved_url = entry.get("webpage_url") or entry.get("original_url") or ""
+        if not resolved_url:
+            continue
+        track.webpage_url = resolved_url
+        if not track.thumbnail:
+            track.thumbnail = entry.get("thumbnail") or ""
+        if not track.duration:
+            track.duration = int(entry.get("duration") or 0)
+        track.source = source
+        return stream_url
+
+    raise RuntimeError(
+        f"no playable source found for {track.search_query!r} "
+        "(YouTube and SoundCloud searches came up empty)"
+    )
+
+
 async def get_stream_url(track: Track) -> str:
+    if not track.webpage_url and track.search_query:
+        return await _resolve_lazy_track(track)
     data = await _yt_extract(YTDL_OPTS, track.webpage_url)
     return data.get("url", "")
 

@@ -5,7 +5,8 @@ import discord
 from dotenv import load_dotenv
 from typing import Optional, Dict, Callable, Awaitable, Tuple
 
-from audio import MusicPlayer, search_tracks, load_playlist, is_playlist_url
+from audio import MusicPlayer, Track, search_tracks, load_playlist, is_playlist_url
+from spotify import is_spotify_url, fetch_spotify
 
 load_dotenv()
 
@@ -340,6 +341,51 @@ async def on_voice_state_update(
         await _notify(member.guild.id)
 
 
+# ------------------------------------------------------------------ spotify
+
+def _spotify_meta_to_track(meta: dict) -> Track:
+    """Build a lazily-resolved Track from Spotify embed metadata."""
+    title = meta.get("title", "")
+    artists = meta.get("artists", "")
+    return Track(
+        webpage_url="",   # resolved on demand by audio.get_stream_url
+        title=title,
+        artist=artists or "Unknown Artist",
+        duration=int(meta.get("duration_ms") or 0) // 1000,
+        thumbnail=meta.get("thumbnail", ""),
+        search_query=f"{artists} - {title}" if artists else title,
+        source="spotify",
+    )
+
+
+async def _play_spotify(p: MusicPlayer, url: str) -> dict:
+    """Shared Spotify handler for api_play/api_play_playlist/slash /play.
+
+    Fetches metadata from the embed page, enqueues lazy tracks and kicks
+    playback if the player is idle. Mirrors the regular play/playlist
+    response shapes: {ok, track} for a single track, {ok, count} for
+    playlists/albums.
+    """
+    try:
+        kind, metas = await fetch_spotify(url)
+    except Exception as exc:
+        print(f"[spotify] fetch failed for {url!r}: {exc}")
+        return {"ok": False, "error": f"spotify: {exc}"}
+
+    tracks = [_spotify_meta_to_track(m) for m in metas]
+    if kind == "track":
+        track = tracks[0]
+        await p.enqueue(track)
+        if not p.is_playing and not p.is_paused:
+            await p.play_next()
+        return {"ok": True, "track": track.to_dict()}
+
+    await p.enqueue_many(tracks)
+    if not p.is_playing and not p.is_paused:
+        await p.play_next()
+    return {"ok": True, "count": len(tracks)}
+
+
 # ------------------------------------------------------------------ slash commands
 
 @bot.slash_command(name="join", description="Подключить бота к голосовому каналу")
@@ -378,6 +424,18 @@ async def cmd_play(ctx: discord.ApplicationContext, query: str) -> None:
             return
     elif p.voice_client is None:
         p.voice_client = ctx.voice_client
+
+    # Spotify links go through the shared metadata + lazy-resolve path
+    if is_spotify_url(query):
+        result = await _play_spotify(p, query)
+        if not result.get("ok"):
+            await ctx.followup.send(f"Spotify: {result.get('error', 'ошибка')}")
+        elif "count" in result:
+            await ctx.followup.send(f"Добавлено треков из Spotify: {result['count']}")
+        else:
+            t = result["track"]
+            await ctx.followup.send(f"Добавлен: **{t['title']}** — {t['artist']}")
+        return
 
     results = await search_tracks(query, max_results=1)
     if not results:
@@ -592,6 +650,13 @@ async def api_leave(guild_id: int) -> dict:
 
 
 async def api_play(guild_id: int, query: str) -> dict:
+    # Spotify URLs (track/playlist/album) are resolved via embed metadata —
+    # must be routed before the generic playlist-URL check.
+    if is_spotify_url(query):
+        p = _player(guild_id)
+        if not p.voice_client or not p.voice_client.is_connected():
+            return {"ok": False, "error": "bot not in a voice channel"}
+        return await _play_spotify(p, query)
     # Whole-playlist URLs go through the playlist loader
     if is_playlist_url(query):
         return await api_play_playlist(guild_id, query)
@@ -612,6 +677,10 @@ async def api_play_playlist(guild_id: int, url: str) -> dict:
     p = _player(guild_id)
     if not p.voice_client or not p.voice_client.is_connected():
         return {"ok": False, "error": "bot not in a voice channel"}
+    # The client routes anything with /playlist or /album here — including
+    # Spotify collections, which need the embed-metadata path instead.
+    if is_spotify_url(url):
+        return await _play_spotify(p, url)
     tracks = await load_playlist(url)
     if not tracks:
         return {"ok": False, "error": "playlist empty or unavailable"}

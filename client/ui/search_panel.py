@@ -30,7 +30,7 @@ class SearchPanel(QWidget):
 
         self._input = QLineEdit()
         self._input.setPlaceholderText(
-            "Search YouTube — song name, artist, or paste a track/playlist URL…"
+            "Search YouTube — song, artist, or paste a YouTube/Spotify URL…"
         )
         self._input.returnPressed.connect(self._on_submit)
         bar.addWidget(self._input, 1)
@@ -272,7 +272,14 @@ class _ResultRow(QFrame):
         m, s   = divmod(dur, 60)
 
         self._title.setText(title)
-        self._meta.setText(f"{artist}  •  {m}:{s:02d}")
+        meta = f"{artist}  •  {m}:{s:02d}"
+        # Non-YouTube results are labelled with their source
+        source = track.get("source")
+        if source == "soundcloud":
+            meta += "  •  SoundCloud"
+        elif source == "spotify":
+            meta += "  •  Spotify"
+        self._meta.setText(meta)
 
     # ── animated hover ────────────────────────────────────────────────────
 
