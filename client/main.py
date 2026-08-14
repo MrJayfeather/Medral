@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from styles          import STYLESHEET
 from defaults        import DEFAULT_HOST, DEFAULT_PORT, SENTRY_DSN, SPLASH_VERSION
 from i18n            import tr, init_lang
+from procutil        import child_env
 from network         import ApiClient
 from ui.main_window   import MainWindow
 from ui.splash_screen import SplashScreen
@@ -104,6 +105,7 @@ def _start_local_server() -> bool:
         [str(exe), "--server"],
         creationflags=subprocess.CREATE_NO_WINDOW,
         cwd=str(exe.parent),
+        env=child_env(),
     )
     return True
 
@@ -284,7 +286,11 @@ class _AutoUpdater(QObject):
 
         bat = tempfile.mktemp(suffix=".bat")
         Path(bat).write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
-        subprocess.Popen(["cmd", "/c", bat], creationflags=subprocess.CREATE_NO_WINDOW)
+        subprocess.Popen(
+            ["cmd", "/c", bat],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            env=child_env(),
+        )
         return True
 
 

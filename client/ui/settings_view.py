@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QVariantAnimation, QEasingCurve
 from PyQt6.QtGui import QPainter, QColor, QLinearGradient, QBrush
 
 from i18n import tr, get_lang, set_lang
+from procutil import child_env
 
 
 class ToggleSwitch(QAbstractButton):
@@ -462,5 +463,5 @@ class SettingsView(QWidget):
     def _on_restart_clicked(self) -> None:
         # frozen only (the button is hidden otherwise): relaunch the exe
         # and quit — aboutToQuit → apply_on_exit runs as usual
-        subprocess.Popen([sys.executable])
+        subprocess.Popen([sys.executable], env=child_env())
         QApplication.quit()
