@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         self._settings.back_requested.connect(self._close_settings)
         self._settings.connect_requested.connect(self._on_settings_connect)
         self._settings.logout_requested.connect(self._on_settings_logout)
+        self._settings.settings_changed.connect(self._on_playback_setting)
 
         self.ch_panel.join_requested.connect(
             lambda g, c: self.client.join(g, c)
@@ -254,6 +255,9 @@ class MainWindow(QMainWindow):
         self.ch_panel.update_state(state)
         self.player_panel.update_state(state)
         self.queue_panel.update_state(state)
+        settings = state.get("settings")
+        if isinstance(settings, dict):
+            self._settings.set_playback_settings(settings)
 
     # ── guild list ────────────────────────────────────────────────────────
 
@@ -424,6 +428,11 @@ class MainWindow(QMainWindow):
         elif self._state.get("is_playing"):
             self.client.pause(self._guild_id)
 
+    @pyqtSlot(str, bool)
+    def _on_playback_setting(self, key: str, value: bool) -> None:
+        if self._guild_id is not None:
+            self.client.set_settings(self._guild_id, {key: value})
+
     # ── settings page ─────────────────────────────────────────────────────
 
     def _open_settings(self) -> None:
@@ -445,6 +454,7 @@ class MainWindow(QMainWindow):
 
         self._settings.set_values(host, port)
         self._settings.set_username(self._user_lbl.text())
+        self._settings.set_playback_enabled(self._guild_id is not None)
         if self._stack.currentWidget() is not self._settings:
             self._stack.setCurrentWidget(self._settings)
             anim.fade_in(self._settings, ms=250, dy=8)

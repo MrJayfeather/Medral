@@ -4,7 +4,9 @@ import os
 import random
 import tempfile
 import time
+import urllib.parse
 import urllib.request
+import uuid
 import yt_dlp
 import discord
 from dataclasses import dataclass
@@ -45,6 +47,23 @@ FFMPEG_OPTIONS = {
     "options": "-vn",  # FFmpegPCMAudio appends -f s16le -ar 48000 -ac 2 itself
 }
 
+# Single-pass (dynamic) loudness normalization applied on the fly. One-pass
+# loudnorm can't hit the exact integrated target a two-pass run would, but it
+# evens out quiet/loud tracks well enough for live playback.
+LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
+
+def _ffmpeg_output_opts(player: "MusicPlayer") -> str:
+    """FFmpeg output options for every audio source this player spawns.
+
+    Always strips video (-vn); adds the loudnorm filter when the per-guild
+    "normalize" setting is enabled. Used by play_next (local file + stream)
+    and seek (both variants) so the filter string lives in one place.
+    """
+    if player.settings.get("normalize"):
+        return f"-vn -af {LOUDNORM_FILTER}"
+    return "-vn"
+
 
 @dataclass
 class Track:
@@ -65,8 +84,35 @@ class Track:
             "artist": self.artist,
             "duration": self.duration,
             "thumbnail": self.thumbnail,
+            # Needed to persist lazily-resolved (Spotify) tracks across
+            # restarts; the desktop client simply ignores unknown fields.
+            "search_query": self.search_query,
             "source": self.source,
         }
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def track_from_dict(d: dict) -> Track:
+    """Inverse of Track.to_dict(): rebuild a Track from a plain dict.
+
+    Every field falls back to a sensible default so partially-written or
+    older state files never crash the restore path.
+    """
+    return Track(
+        webpage_url=str(d.get("webpage_url") or ""),
+        title=str(d.get("title") or "Unknown Title"),
+        artist=str(d.get("artist") or "Unknown Artist"),
+        duration=_safe_int(d.get("duration")),
+        thumbnail=str(d.get("thumbnail") or ""),
+        search_query=str(d.get("search_query") or ""),
+        source=str(d.get("source") or "youtube"),
+    )
 
 
 async def _yt_extract(opts: dict, query: str) -> dict:
@@ -295,7 +341,11 @@ def _download_to_cache(url: str, key: str) -> str:
     path = os.path.join(AUDIO_CACHE_DIR, key)
     if os.path.exists(path) and os.path.getsize(path) > 0:
         return path
-    tmp_path = path + ".part"
+    # Unique tmp name: a background prefetch and a foreground play_next may
+    # download the same key concurrently — each writes its own tmp file and
+    # the atomic replace below makes the last complete copy win. Leftover
+    # .part files are swept by _purge_cache.
+    tmp_path = f"{path}.{uuid.uuid4().hex[:8]}.part"
     pos = 0
     total = None   # unknown until the first response tells us
     stall_retries = 0
@@ -348,6 +398,28 @@ async def download_track(stream_url: str, track: Track) -> Optional[str]:
         return None
 
 
+# ------------------------------------------------------------------ radio mode
+
+RADIO_ENQUEUE_COUNT = 5          # related tracks appended per radio refill
+RADIO_MIX_FETCH_LIMIT = 25       # RD mixes serve ~25 entries; fetch them all
+                                 # so filtering out repeats still leaves picks
+
+
+def _youtube_video_id(url: str) -> str:
+    """Video id from a YouTube watch URL ('' for non-YouTube/unparseable)."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return ""
+    host = parsed.netloc.lower()
+    if host.endswith("youtu.be"):
+        return parsed.path.lstrip("/").split("/")[0]
+    if "youtube.com" not in host:
+        return ""
+    values = urllib.parse.parse_qs(parsed.query).get("v") or []
+    return values[0] if values else ""
+
+
 # Loop modes
 LOOP_NONE = "none"
 LOOP_ONE = "one"
@@ -374,9 +446,13 @@ class MusicPlayer:
         self._intentional_stop: bool = False
         self._seeking: bool = False
         self.loop_mode: str = LOOP_NONE
+        # Per-guild playback settings, persisted across restarts by bot.py
+        self.settings: dict = {"normalize": True, "radio": False}
         # Serializes play_next/seek — a seek arriving while the next track is
         # still downloading must not spawn a second concurrent audio source.
         self._play_lock = asyncio.Lock()
+        # Background prefetch of the upcoming track (one task per player)
+        self._prefetch_task: Optional[asyncio.Task] = None
 
         # progress tracking
         self._play_started_at: float = 0.0
@@ -482,9 +558,15 @@ class MusicPlayer:
                         pass
 
                 if local:
-                    raw_source = discord.FFmpegPCMAudio(local, options="-vn")
+                    raw_source = discord.FFmpegPCMAudio(
+                        local, options=_ffmpeg_output_opts(self)
+                    )
                 else:
-                    raw_source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
+                    raw_source = discord.FFmpegPCMAudio(
+                        stream_url,
+                        before_options=FFMPEG_OPTIONS["before_options"],
+                        options=_ffmpeg_output_opts(self),
+                    )
                 source = discord.PCMVolumeTransformer(raw_source, volume=self._volume)
                 break
             except Exception as exc:
@@ -502,7 +584,88 @@ class MusicPlayer:
                 loop.create_task(self.play_next())
 
         self.voice_client.play(source, after=_after)
+        # Warm up what comes next (lazy resolve / pre-download / radio refill)
+        # in the background — never blocks or affects the track just started.
+        self._start_prefetch()
         await self._on_state_change(self.guild_id)
+
+    # ------------------------------------------------------------------ prefetch
+
+    def _start_prefetch(self) -> None:
+        """Fire-and-forget prefetch of upcoming playback (one per player)."""
+        old = self._prefetch_task
+        if old is not None and not old.done():
+            old.cancel()
+        self._prefetch_task = asyncio.get_running_loop().create_task(
+            self._prefetch_next()
+        )
+
+    async def _prefetch_next(self) -> None:
+        """Prepare the next track while the current one is playing.
+
+        - Radio mode: if the queue is empty (current track is the last one)
+          and settings["radio"] is on, pull YouTube's RD mix for the current
+          track and append a few related tracks.
+        - Lazy tracks (Spotify): resolve queue[0] to a real URL up front.
+        - Long tracks: pre-download into the local cache so the follow-up
+          play_next() picks the file up instantly (gapless transition).
+
+        All failures are logged and swallowed — prefetch must never affect
+        the track that is already playing.
+        """
+        try:
+            if self.settings.get("radio") and not self.queue and self.current:
+                await self._radio_extend()
+            if not self.queue:
+                return
+            nxt = self.queue[0]
+            stream_url = ""
+            if not nxt.webpage_url and nxt.search_query:
+                # Mutates the track in place (webpage_url/thumbnail/duration)
+                stream_url = await _resolve_lazy_track(nxt)
+                # Clients show the resolved metadata right away
+                await self._on_state_change(self.guild_id)
+            if 0 < nxt.duration and nxt.duration >= PREBUFFER_MIN_DURATION:
+                if not stream_url:
+                    stream_url = await get_stream_url(nxt)
+                if stream_url:
+                    # Cache hit in the later play_next() is instant
+                    await download_track(stream_url, nxt)
+        except Exception as exc:
+            print(f"[prefetch] error (guild {self.guild_id}): {exc}")
+
+    async def _radio_extend(self) -> None:
+        """Append a few RD-mix ("radio") tracks related to the current one."""
+        current = self.current
+        if current is None or current.source == "soundcloud":
+            # SoundCloud pages have no YouTube mix — skip radio for them
+            return
+        video_id = _youtube_video_id(current.webpage_url)
+        if not video_id:
+            return
+        mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+        candidates = await load_playlist(mix_url, max_tracks=RADIO_MIX_FETCH_LIMIT)
+
+        # Skip the seed track itself and anything already played or queued
+        seen = {
+            (t.title.casefold(), t.artist.casefold())
+            for t in [*self.history, *self.queue, current]
+        }
+        picked: List[Track] = []
+        for t in candidates:
+            if video_id in t.webpage_url:
+                continue
+            key = (t.title.casefold(), t.artist.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            picked.append(t)
+            if len(picked) >= RADIO_ENQUEUE_COUNT:
+                break
+        if picked:
+            await self.enqueue_many(picked)   # single state_update broadcast
+            print(f"[radio] queued {len(picked)} related track(s) "
+                  f"after {current.title!r}")
 
     # ------------------------------------------------------------------ controls
 
@@ -540,7 +703,7 @@ class MusicPlayer:
             # Local cache copy — instant seek, no risk of a stale stream URL
             seek_opts = {
                 "before_options": f"-ss {position:.2f}",
-                "options": "-vn",
+                "options": _ffmpeg_output_opts(self),
             }
             seek_target = self._current_file
         else:
@@ -548,7 +711,7 @@ class MusicPlayer:
                 "before_options": (
                     f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -ss {position:.2f}"
                 ),
-                "options": "-vn",
+                "options": _ffmpeg_output_opts(self),
             }
             seek_target = self._current_stream_url
         raw_source = discord.FFmpegPCMAudio(seek_target, **seek_opts)
@@ -643,6 +806,9 @@ class MusicPlayer:
 
     async def stop_and_disconnect(self) -> None:
         self.queue.clear()
+        # A prefetch working for the queue we just cleared is pointless
+        if self._prefetch_task is not None and not self._prefetch_task.done():
+            self._prefetch_task.cancel()
         if self.voice_client:
             # Set the flag only when a real disconnect will follow — the flag
             # is consumed by on_voice_state_update, and without a disconnect
@@ -675,6 +841,7 @@ class MusicPlayer:
             "is_paused": self.is_paused,
             "volume": self._volume,
             "loop_mode": self.loop_mode,
+            "settings": dict(self.settings),
             "voice_channel_id": (
                 str(self.voice_client.channel.id)
                 if self.voice_client and self.voice_client.channel

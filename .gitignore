@@ -19,6 +19,10 @@ ENV/
 sessions.json
 sessions.json.tmp
 
+# Persisted player state (queues, settings) — runtime data
+player_state.json
+player_state.json.tmp
+
 # Distribution / packaging
 dist/
 build/

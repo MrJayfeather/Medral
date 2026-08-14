@@ -273,6 +273,10 @@ class ApiClient(QObject):
         """mode: "none" | "one" | "all"."""
         self._submit(self._post("/loop", {"guild_id": guild_id, "mode": mode}))
 
+    def set_settings(self, guild_id: int, settings: dict) -> None:
+        """Partial per-guild settings update, e.g. {"normalize": True}."""
+        self._submit(self._post("/settings", {"guild_id": guild_id, "settings": settings}))
+
     # queue
     def shuffle(self, guild_id: int) -> None:
         self._submit(self._post("/shuffle", {"guild_id": guild_id}))

@@ -10,9 +10,100 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton,
+    QLabel, QLineEdit, QPushButton, QAbstractButton,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QVariantAnimation, QEasingCurve
+from PyQt6.QtGui import QPainter, QColor, QLinearGradient, QBrush
+
+
+class ToggleSwitch(QAbstractButton):
+    """iOS-style animated toggle: 40x22 track (radius 11), 18px knob.
+
+    Checked — accent gradient #6C63FF -> #A78BFA, unchecked — #2a2a40.
+    The knob position is animated over 150 ms (OutCubic) via QVariantAnimation.
+    """
+
+    _TRACK_W  = 40
+    _TRACK_H  = 22
+    _KNOB     = 18
+    _MARGIN   = 2   # (22 - 18) / 2
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(self._TRACK_W, self._TRACK_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # 0.0 = knob left (off), 1.0 = knob right (on)
+        self._pos = 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_anim_value)
+
+        self.toggled.connect(self._animate_to_state)
+
+    # ── animation ─────────────────────────────────────────────────────────
+
+    def _on_anim_value(self, value) -> None:
+        self._pos = float(value)
+        self.update()
+
+    def _animate_to_state(self, checked: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._pos)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    # ── public ────────────────────────────────────────────────────────────
+
+    def set_checked_silent(self, checked: bool) -> None:
+        """Sync the visual state without emitting toggled (no animation)."""
+        self._anim.stop()
+        self.blockSignals(True)
+        self.setChecked(checked)
+        self.blockSignals(False)
+        self._pos = 1.0 if checked else 0.0
+        self.update()
+
+    # ── painting ──────────────────────────────────────────────────────────
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.4)
+        p.setPen(Qt.PenStyle.NoPen)
+
+        # track: blend between off-color and the accent gradient as the
+        # knob travels, so mid-animation the background transitions too
+        radius = self._TRACK_H / 2
+        if self._pos > 0.0:
+            grad = QLinearGradient(0, 0, self._TRACK_W, 0)
+            on_l, on_r, off = QColor("#6C63FF"), QColor("#A78BFA"), QColor("#2a2a40")
+            t = self._pos
+
+            def _mix(a: QColor, b: QColor) -> QColor:
+                return QColor(
+                    round(a.red()   + (b.red()   - a.red())   * t),
+                    round(a.green() + (b.green() - a.green()) * t),
+                    round(a.blue()  + (b.blue()  - a.blue())  * t),
+                )
+
+            grad.setColorAt(0.0, _mix(off, on_l))
+            grad.setColorAt(1.0, _mix(off, on_r))
+            p.setBrush(QBrush(grad))
+        else:
+            p.setBrush(QColor("#2a2a40"))
+        p.drawRoundedRect(0, 0, self._TRACK_W, self._TRACK_H, radius, radius)
+
+        # knob
+        x_off = self._MARGIN
+        x_on  = self._TRACK_W - self._KNOB - self._MARGIN
+        x = x_off + (x_on - x_off) * self._pos
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(int(round(x)), self._MARGIN, self._KNOB, self._KNOB)
+        p.end()
 
 
 def _read_version() -> str:
@@ -41,6 +132,7 @@ class SettingsView(QWidget):
     back_requested    = pyqtSignal()
     connect_requested = pyqtSignal(str, int)   # host, port
     logout_requested  = pyqtSignal()
+    settings_changed  = pyqtSignal(str, bool)  # key ("normalize"/"radio"), value
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -152,6 +244,28 @@ class SettingsView(QWidget):
         c_lay.addWidget(divider)
         c_lay.addSpacing(8)
 
+        play_sec = QLabel("ВОСПРОИЗВЕДЕНИЕ")
+        play_sec.setObjectName("sectionTitle")
+        c_lay.addWidget(play_sec)
+
+        self._normalize_toggle = self._add_toggle_row(
+            c_lay, "normalize",
+            "Нормализация громкости",
+            "Выравнивает громкость треков",
+        )
+        self._radio_toggle = self._add_toggle_row(
+            c_lay, "radio",
+            "Радио-режим",
+            "Когда очередь кончается, бот продолжает похожими треками",
+        )
+
+        c_lay.addSpacing(8)
+        divider2 = QFrame()
+        divider2.setObjectName("divider")
+        divider2.setFixedHeight(1)
+        c_lay.addWidget(divider2)
+        c_lay.addSpacing(8)
+
         acc_sec = QLabel("АККАУНТ")
         acc_sec.setObjectName("sectionTitle")
         c_lay.addWidget(acc_sec)
@@ -179,7 +293,51 @@ class SettingsView(QWidget):
         ver.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
         root.addWidget(ver)
 
+    def _add_toggle_row(
+        self, layout: QVBoxLayout, key: str, title: str, subtitle: str,
+    ) -> ToggleSwitch:
+        """One playback-settings row: title + muted subtitle, toggle on the right."""
+        row = QHBoxLayout()
+        row.setSpacing(12)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        t_lbl = QLabel(title)
+        t_lbl.setStyleSheet("color:#e8e8f5; background:transparent;")
+        s_lbl = QLabel(subtitle)
+        s_lbl.setStyleSheet("color:#6b6b8a; font-size:11px; background:transparent;")
+        s_lbl.setWordWrap(True)
+        text_col.addWidget(t_lbl)
+        text_col.addWidget(s_lbl)
+        row.addLayout(text_col, 1)
+
+        toggle = ToggleSwitch()
+        toggle.toggled.connect(
+            lambda checked, k=key: self.settings_changed.emit(k, checked)
+        )
+        row.addWidget(toggle, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        layout.addLayout(row)
+        return toggle
+
     # ── public ────────────────────────────────────────────────────────────
+
+    def set_playback_settings(self, settings: dict) -> None:
+        """Sync toggles to server state without re-emitting settings_changed."""
+        if not isinstance(settings, dict):
+            return
+        for key, toggle in (
+            ("normalize", self._normalize_toggle),
+            ("radio",     self._radio_toggle),
+        ):
+            value = settings.get(key)
+            if isinstance(value, bool) and toggle.isChecked() != value:
+                toggle.set_checked_silent(value)
+
+    def set_playback_enabled(self, enabled: bool) -> None:
+        """Disable toggles (dimmed to 0.4 opacity) when no guild is selected."""
+        self._normalize_toggle.setEnabled(enabled)
+        self._radio_toggle.setEnabled(enabled)
 
     def set_values(self, host: str, port: int) -> None:
         self._fallback_host = host

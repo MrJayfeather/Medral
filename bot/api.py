@@ -326,6 +326,12 @@ async def lifespan(app: FastAPI):
         keepalive_task.cancel()
         if _guilds_update_task is not None and not _guilds_update_task.done():
             _guilds_update_task.cancel()
+        # Flush the debounced player-state persist — otherwise the last <=5s
+        # of queue/settings changes are lost on systemctl restart
+        try:
+            await music_bot._persist_state()
+        except Exception as exc:
+            print(f"[persist] final flush failed: {exc}")
         bot_task.cancel()
         if not music_bot.bot.is_closed():
             await music_bot.bot.close()
@@ -367,6 +373,7 @@ def _empty_state(guild_id: int) -> dict:
         "is_paused": False,
         "volume": 0.5,
         "loop_mode": "none",
+        "settings": {"normalize": True, "radio": False},
         "voice_channel_id": None,
     }
 
@@ -430,6 +437,23 @@ class LoopBody(BaseModel):
 class PlaylistBody(BaseModel):
     guild_id: int
     url: str
+
+
+class SettingsBody(BaseModel):
+    guild_id: int
+    settings: dict   # partial update: {"normalize"?: bool, "radio"?: bool}
+
+    @field_validator("settings")
+    @classmethod
+    def _check_settings(cls, v: dict) -> dict:
+        if not v:
+            raise ValueError("settings must not be empty")
+        for key, value in v.items():
+            if key not in ("normalize", "radio"):
+                raise ValueError(f"unknown setting: {key}")
+            if not isinstance(value, bool):
+                raise ValueError(f"setting '{key}' must be a boolean")
+        return v
 
 
 # ------------------------------------------------------------------ auth endpoints
@@ -668,6 +692,13 @@ async def shuffle(body: GuildBody, session: dict = Depends(get_session)):
 async def set_loop(body: LoopBody, session: dict = Depends(get_session)):
     await _require_same_channel(session, body.guild_id)
     return _ok_or_raise(await music_bot.api_set_loop(body.guild_id, body.mode))
+
+
+@app.post("/settings")
+async def set_settings(body: SettingsBody, session: dict = Depends(get_session)):
+    """Partial update of per-guild playback settings (normalize/radio)."""
+    await _require_same_channel(session, body.guild_id)
+    return _ok_or_raise(await music_bot.api_set_settings(body.guild_id, body.settings))
 
 
 # ------------------------------------------------------------------ search

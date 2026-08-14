@@ -1,11 +1,22 @@
 import os
 import asyncio
+import json
 import time
 import discord
+from collections import deque
+from pathlib import Path
 from dotenv import load_dotenv
 from typing import Optional, Dict, Callable, Awaitable, Tuple
 
-from audio import MusicPlayer, Track, search_tracks, load_playlist, is_playlist_url
+from audio import (
+    LOOP_MODES,
+    MusicPlayer,
+    Track,
+    is_playlist_url,
+    load_playlist,
+    search_tracks,
+    track_from_dict,
+)
 from spotify import is_spotify_url, fetch_spotify
 
 load_dotenv()
@@ -37,6 +48,12 @@ AUTO_LEAVE_DELAY = 300  # seconds
 # membership cache: (guild_id, user_id) -> (is_member, expires_at monotonic)
 _member_cache: Dict[Tuple[int, int], Tuple[bool, float]] = {}
 MEMBER_CACHE_TTL = 300  # seconds
+
+# player-state persistence: queue/settings survive a server restart
+PLAYER_STATE_FILE = Path(__file__).resolve().parent.parent / "player_state.json"
+PERSIST_DEBOUNCE = 5.0  # seconds — collapse bursts of state changes into one write
+_persist_task: Optional[asyncio.Task] = None
+_state_restored = False  # guard: on_ready may fire again on gateway resumes
 
 # set by api.py so state updates are broadcast to WebSocket clients
 _broadcast: Optional[Callable[[int, dict], Awaitable[None]]] = None
@@ -110,6 +127,8 @@ def get_guilds() -> list[dict]:
 async def _notify(guild_id: int) -> None:
     # Every state change re-evaluates the auto-leave timer
     _check_auto_leave(guild_id)
+    # ...and (debounced) re-persists player state to disk
+    _schedule_persist()
     if _broadcast and guild_id in _players:
         await _broadcast(guild_id, _players[guild_id].get_state())
 
@@ -118,6 +137,132 @@ def _player(guild_id: int) -> MusicPlayer:
     if guild_id not in _players:
         _players[guild_id] = MusicPlayer(guild_id, _notify)
     return _players[guild_id]
+
+
+# ------------------------------------------------------------------ persistence
+
+def _snapshot_players() -> dict:
+    """Serializable snapshot of every player with non-empty state.
+
+    The currently playing track is saved as the FIRST queue element: after a
+    restart the bot is not in voice, so the track must wait in the queue
+    instead of being lost in a dangling "current" slot.
+    """
+    data: dict = {}
+    for guild_id, p in _players.items():
+        queue = list(p.queue)
+        if p.current is not None:
+            queue.insert(0, p.current)
+        non_default = (
+            p.loop_mode != "none"
+            or abs(p.volume - 0.5) > 1e-9
+            or p.settings != {"normalize": True, "radio": False}
+        )
+        if not queue and not non_default:
+            continue
+        data[str(guild_id)] = {
+            "queue": [t.to_dict() for t in queue],
+            "current": None,   # always folded into queue[0], see above
+            "loop_mode": p.loop_mode,
+            "volume": p.volume,
+            "settings": dict(p.settings),
+        }
+    return data
+
+
+def _write_state_file(data: dict) -> None:
+    """Blocking atomic write (tmp + replace) — runs in an executor."""
+    tmp = PLAYER_STATE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, PLAYER_STATE_FILE)
+
+
+async def _persist_state() -> None:
+    data = _snapshot_players()
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, _write_state_file, data)
+    except OSError as exc:
+        print(f"[persist] failed to save {PLAYER_STATE_FILE.name}: {exc}")
+
+
+async def _debounced_persist() -> None:
+    try:
+        await asyncio.sleep(PERSIST_DEBOUNCE)
+    except asyncio.CancelledError:
+        return
+    await _persist_state()
+
+
+def _schedule_persist() -> None:
+    """(Re)arm the debounced persist — a burst of changes yields one write."""
+    global _persist_task
+    old = _persist_task
+    if old is not None and not old.done():
+        old.cancel()
+    _persist_task = asyncio.get_running_loop().create_task(_debounced_persist())
+
+
+async def _restore_state() -> None:
+    """Load player_state.json and rebuild queues/settings for each guild.
+
+    voice_client is deliberately left untouched — the bot reconnects to
+    voice only on an explicit /join (or api_join) after a restart.
+    """
+    if not PLAYER_STATE_FILE.exists():
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        raw = await loop.run_in_executor(
+            None, lambda: PLAYER_STATE_FILE.read_text(encoding="utf-8")
+        )
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[persist] failed to load {PLAYER_STATE_FILE.name}: {exc}")
+        return
+    if not isinstance(data, dict):
+        print(f"[persist] ignoring malformed {PLAYER_STATE_FILE.name}")
+        return
+
+    restored = 0
+    for guild_id_str, entry in data.items():
+        # One corrupted guild entry must not abort the whole restore
+        try:
+            guild_id = int(guild_id_str)
+            if not isinstance(entry, dict):
+                continue
+            p = _player(guild_id)
+
+            tracks = [
+                track_from_dict(t)
+                for t in entry.get("queue") or []
+                if isinstance(t, dict)
+            ]
+            # Defensive: older/foreign files may still carry a separate "current"
+            current = entry.get("current")
+            if isinstance(current, dict):
+                tracks.insert(0, track_from_dict(current))
+            p.queue = deque(tracks)
+
+            loop_mode = entry.get("loop_mode")
+            if loop_mode in LOOP_MODES:
+                p.loop_mode = loop_mode
+
+            volume = entry.get("volume")
+            if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+                p.set_volume(float(volume))
+
+            settings = entry.get("settings")
+            if isinstance(settings, dict):
+                for key, value in settings.items():
+                    if key in p.settings and isinstance(value, bool):
+                        p.settings[key] = value
+            restored += 1
+        except Exception as exc:
+            print(f"[persist] skipping guild {guild_id_str}: {exc}")
+
+    if restored:
+        print(f"[persist] restored player state for {restored} guild(s)")
 
 
 # ------------------------------------------------------------------ auto-leave
@@ -194,8 +339,13 @@ def _check_auto_leave(guild_id: int) -> None:
 
 @bot.event
 async def on_ready() -> None:
+    global _state_restored
     print(f"[bot] ready — {bot.user} (id: {bot.user.id})")
     print(f"[bot] serving {len(bot.guilds)} guild(s)")
+    # Restore persisted queues/settings exactly once per process
+    if not _state_restored:
+        _state_restored = True
+        await _restore_state()
 
 
 async def _reconnect_voice(guild_id: int, channel_id: int) -> None:
@@ -552,6 +702,8 @@ async def cmd_resume(ctx: discord.ApplicationContext) -> None:
 @bot.slash_command(name="stop", description="Остановить воспроизведение и очистить очередь")
 async def cmd_stop(ctx: discord.ApplicationContext) -> None:
     p = _player(ctx.guild_id)
+    if p._prefetch_task is not None and not p._prefetch_task.done():
+        p._prefetch_task.cancel()
     p.queue.clear()
     if p.is_playing or p.is_paused:
         # Park the track in history before stopping — otherwise loop one/all
@@ -723,6 +875,10 @@ async def api_resume(guild_id: int) -> dict:
 
 async def api_stop(guild_id: int) -> dict:
     p = _player(guild_id)
+    # Cancel any in-flight prefetch/radio task — a radio extension finishing
+    # after "stop" would silently refill the just-cleared queue
+    if p._prefetch_task is not None and not p._prefetch_task.done():
+        p._prefetch_task.cancel()
     p.queue.clear()
     if p.is_playing or p.is_paused:
         # Park the track in history before stopping — otherwise loop one/all
@@ -760,6 +916,24 @@ async def api_set_volume(guild_id: int, volume: float) -> dict:
     p.set_volume(volume)
     await _notify(guild_id)
     return {"ok": True}
+
+
+async def api_set_settings(guild_id: int, settings: dict) -> dict:
+    """Partial update of per-guild playback settings (known bool keys only)."""
+    p = _player(guild_id)
+    for key, value in settings.items():
+        if key not in p.settings:
+            return {"ok": False, "error": f"unknown setting: {key}"}
+        if not isinstance(value, bool):
+            return {"ok": False, "error": f"setting '{key}' must be a boolean"}
+    p.settings.update(settings)
+    # Radio switched on while the last track is already playing: kick the
+    # prefetcher now, otherwise related tracks would only be pulled on the
+    # next play_next() — which never comes for an empty queue.
+    if settings.get("radio") and p.current and not p.queue:
+        p._start_prefetch()
+    await _notify(guild_id)
+    return {"ok": True, "settings": dict(p.settings)}
 
 
 async def api_seek(guild_id: int, position: float) -> dict:
